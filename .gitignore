@@ -1,0 +1,15 @@
+# Security
+.env
+
+# Models & Data (Quá nặng cho GitHub, giám khảo chỉ cần xem code)
+saved_models/*.zip
+data/raw/*
+data/processed/*
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Streamlit/Notebook checkpoints
+.ipynb_checkpoints/
+.streamlit/
