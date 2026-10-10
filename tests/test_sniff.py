@@ -80,7 +80,7 @@ if __name__ == "__main__":
     print("Detecting... (Ctrl+C to stop)")
     try:
         sniff(iface = "wlan0", prn = process_packet, 
-      store = False, count = 10)
+                store = False, count = 10)
     except Exception as e:
         print(f"Lỗi khi truy cập card Vô Tuyến: {e}")
 # iface: network interface name
