@@ -1,6 +1,7 @@
 import yaml
 import os
-from scapy.all import ARP, Ether, srp
+from scapy.all import srp
+from scapy.layers.l2 import ARP, Ether
 
 # Đường dẫn lưu file cấu hình mạng (Nằm ở thư mục configs/ đã có sẵn)
 CONFIG_PATH = "configs/network_config.yaml"

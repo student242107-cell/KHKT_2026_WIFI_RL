@@ -4,65 +4,89 @@ import time
 import threading
 import re
 import numpy as np
-from scapy.all import sniff, Dot11
+from scapy.all import sniff
+from scapy.layers.dot11 import Dot11
 from datetime import datetime
+
+# Địa chỉ MAC của cổng Default Gateway (Cổng nối ra Internet của trường)
+# Bạn nhớ sửa thành MAC của cổng WAN/LAN Router của bạn nhé!
+GATEWAY_MAC = "00:15:5d:d8:73:d3".upper()
 
 class MultiAPTelemetryETL:
     def __init__(self, iface_mon="wlan0mon"):
         self.iface_mon = iface_mon
         self.raw_tshark_path = "data/raw/tshark_raw.txt"
-        
-        # Đường dẫn file JSON xuất ra (Per-AP State)
         self.processed_json_path = "data/processed/per_ap_state.json"
         
         os.makedirs(os.path.dirname(self.raw_tshark_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.processed_json_path), exist_ok=True)
         
-        # --- CẤU TRÚC LƯU TRỮ MỚI: TÁCH BIỆT THEO TỪNG AP ---
-        # Khóa (Key) của dictionary sẽ là địa chỉ MAC của AP (BSSID).
-        # Ví dụ: {'MAC_AP1': {'packet_count': 100, 'retry_count': 5, 'rssi_list': [-60, -62], 'clients': set()}}
+        # Ngăn kéo hồ sơ bệnh án cho từng AP (BSSID)
         self.ap_stats = {}
-        
         self.lock = threading.Lock()
 
+    def _parse_mac_frame(self, pkt):
+        """Hàm chuẩn mực IEEE 802.11 để bóc tách địa chỉ MAC dựa trên ToDS/FromDS"""
+        dot11 = pkt.getlayer(Dot11)
+        fc_field = int(dot11.FCfield)
+        to_ds = bool(fc_field & 0x1)
+        from_ds = bool(fc_field & 0x2)
+        
+        src_addr, dst_addr, bssid = None, None, None
+        
+        if not to_ds and not from_ds:    # Ad-hoc / Management
+            dst_addr, src_addr, bssid = dot11.addr1, dot11.addr2, dot11.addr3
+        elif to_ds and not from_ds:      # Uplink (STA -> AP)
+            bssid, src_addr, dst_addr = dot11.addr1, dot11.addr2, dot11.addr3
+        elif not to_ds and from_ds:      # Downlink (AP -> STA)
+            dst_addr, bssid, src_addr = dot11.addr1, dot11.addr2, dot11.addr3
+        elif to_ds and from_ds:          # WDS / Mesh
+            dst_addr, src_addr = dot11.addr3, getattr(dot11, 'addr4', None)
+            bssid = dot11.addr1 # Ước lượng trong WDS
+            
+        return (bssid.upper() if bssid else None, 
+                src_addr.upper() if src_addr else None, 
+                dst_addr.upper() if dst_addr else None)
+
     def _scapy_handler(self, pkt):
-        """Callback: Bóc tách gói tin Wi-Fi và ném vào 'ngăn kéo' của đúng AP đó"""
-        if pkt.haslayer(Dot11):
+        """Bóc tách gói tin: Phân phòng (AP) và Phân bệnh (Internet/Local)"""
+        if pkt.haslayer(Dot11) and pkt.type == 2: # Chỉ xét Data Frame
+            
+            bssid, src_mac, dst_mac = self._parse_mac_frame(pkt)
+            
+            # Bỏ qua nếu không rõ BSSID
+            if not bssid or bssid == "FF:FF:FF:FF:FF:FF":
+                return
+                
             with self.lock:
-                # addr3 trong 802.11 thường là BSSID (Địa chỉ MAC của Router/AP phát sóng)
-                bssid = pkt.addr3
-                client_mac = pkt.addr2
-                
-                # Bỏ qua các gói tin Broadcast hoặc rác không có BSSID rõ ràng
-                if not bssid or bssid == "ff:ff:ff:ff:ff:ff":
-                    return
-                
-                # Nếu phát hiện AP mới, tạo ngay một 'ngăn kéo' cho nó
                 if bssid not in self.ap_stats:
+                    # Cấu trúc ngăn kéo mới: Tách bạch Internet và Local
                     self.ap_stats[bssid] = {
-                        "packet_count": 0,
-                        "retry_count": 0,
-                        "rssi_list": [],
-                        "clients": set()
+                        "internet_data": 0, "internet_retry": 0,
+                        "local_data": 0, "local_retry": 0,
+                        "rssi_list": [], "clients": set()
                     }
                 
-                # --- CẬP NHẬT DỮ LIỆU CHO ĐÚNG CỤC AP ĐÓ ---
-                self.ap_stats[bssid]["packet_count"] += 1
+                # Kiểm tra cờ Retry (Đụng độ)
+                is_retry = (pkt.FCfield & 0x08) != 0
                 
-                # Đếm gói tin truyền lại (Va chạm)
-                if pkt.FCfield & 0x08 != 0:
-                    self.ap_stats[bssid]["retry_count"] += 1
+                # --- PHÂN LẠI LUỒNG DỮ LIỆU CHUẨN XÁC ---
+                # Nếu nguồn hoặc đích là Gateway -> Đó là Internet Traffic
+                if src_mac == GATEWAY_MAC or dst_mac == GATEWAY_MAC:
+                    self.ap_stats[bssid]["internet_data"] += 1
+                    if is_retry: self.ap_stats[bssid]["internet_retry"] += 1
+                else: # Ngược lại là Local Traffic
+                    self.ap_stats[bssid]["local_data"] += 1
+                    if is_retry: self.ap_stats[bssid]["local_retry"] += 1
                     
-                # Thu thập RSSI
+                # Thu thập RSSI và Clients
                 if hasattr(pkt, 'dBm_AntSignal'):
                     self.ap_stats[bssid]["rssi_list"].append(pkt.dBm_AntSignal)
-                    
-                # Đếm số lượng Client gắn với AP này
-                if client_mac:
-                    self.ap_stats[bssid]["clients"].add(client_mac)
+                if src_mac and src_mac != GATEWAY_MAC and src_mac != bssid:
+                    self.ap_stats[bssid]["clients"].add(src_mac)
 
     def _channel_hopper(self, channels=[36, 40, 44, 48, 1, 6, 11]):
-        """Tiểu trình ngầm: Ép USB Wi-Fi nhảy kênh liên tục để bao quát toàn trường"""
+        """Radar quét dải tần"""
         print(f"[*] Radar Channel Hopper kích hoạt trên {self.iface_mon}")
         while True:
             for ch in channels:
@@ -70,77 +94,64 @@ class MultiAPTelemetryETL:
                 time.sleep(0.5) 
 
     def _parse_tshark_log(self):
-        """Hàm cào dữ liệu Jitter/Loss từ mạng lõi LAN (Chỉ số này bắt buộc phải dùng chung)"""
+        """(Tshark phần này giữ nguyên như trước)"""
         try:
-            if not os.path.exists(self.raw_tshark_path):
-                return 0.0, 0.0 
-                
+            if not os.path.exists(self.raw_tshark_path): return 0.0, 0.0 
             with open(self.raw_tshark_path, 'r') as f:
                 content = f.read()
-                jitter = 0.0
-                loss_percent = 0.0
-                
                 jitter_matches = re.findall(r'(\d+\.\d+)', content)
-                if jitter_matches:
-                    jitter = float(jitter_matches[-1]) 
-                    
+                jitter = float(jitter_matches[-1]) if jitter_matches else 0.0
                 loss_matches = re.search(r'\((\d+\.\d+)%\)', content)
-                if loss_matches:
-                    loss_percent = float(loss_matches.group(1)) / 100.0
-                    
+                loss_percent = float(loss_matches.group(1)) / 100.0 if loss_matches else 0.0
                 return jitter, loss_percent
         except Exception:
-            pass
-        return 0.0, 0.0
+            return 0.0, 0.0
 
     def etl_loop(self):
-        """Vòng lặp ETL: Tính toán và đóng gói State cho TỪNG AP MỘT"""
-        print("[*] Per-AP Telemetry ETL Pipeline đang chạy ngầm...")
+        """Vòng lặp ETL: Đóng gói bệnh án chi tiết cho từng AP"""
+        print("[*] Per-AP & Traffic-Aware ETL Pipeline đang chạy...")
         while True:
-            time.sleep(30) # Cửa sổ thời gian 30s
+            time.sleep(30) 
             
             with self.lock:
                 now = datetime.now()
                 is_break_time = 1 if (now.minute in range(45, 60)) else 0
-                
-                # Chỉ số mạng lõi lấy từ Tshark
                 global_jitter, global_loss = self._parse_tshark_log()
                 
-                # Dictionary chứa kết quả cuối cùng sẽ xuất ra file JSON
                 final_json_data = {}
                 
-                # --- KHÁM BỆNH CHO TỪNG AP ---
                 for bssid, stats in self.ap_stats.items():
-                    # Nếu AP này không có gói tin nào trong 30s qua, bỏ qua nó
-                    if stats["packet_count"] == 0:
-                        continue
+                    total_pkts = stats["internet_data"] + stats["local_data"]
+                    if total_pkts == 0: continue
                         
-                    retry_rate = stats["retry_count"] / stats["packet_count"]
+                    # Tính toán Tỷ lệ đụng độ chia theo Luồng
+                    internet_p_c = (stats["internet_retry"] / stats["internet_data"]) if stats["internet_data"] > 0 else 0.0
+                    local_p_c = (stats["local_retry"] / stats["local_data"]) if stats["local_data"] > 0 else 0.0
+                    
+                    # p_c tổng hợp cho AI (Ưu tiên trọng số Internet x3 lần Local)
+                    # Nếu Internet nghẽn, AI sẽ báo động. Nếu Local nghẽn, AI châm chước.
+                    blended_retry = (internet_p_c * 0.75) + (local_p_c * 0.25)
+                    p_c = min(1.0, blended_retry + global_loss)
+                    
                     avg_rssi = float(np.mean(stats["rssi_list"])) if stats["rssi_list"] else -90.0
                     sta_count = len(stats["clients"])
+                    airtime_util = min(1.0, (total_pkts * 1500 * 8) / (50 * 1e6))
                     
-                    # Xác suất va chạm của riêng AP này = Retry của AP + Loss của toàn mạng
-                    p_c = min(1.0, retry_rate + global_loss)
-                    # Airtime bị chiếm dụng bởi riêng AP này
-                    airtime_util = min(1.0, (stats["packet_count"] * 1500 * 8) / (50 * 1e6))
-                    
-                    # Đóng gói hồ sơ bệnh án cho AP này
                     final_json_data[bssid] = {
                         "avg_rssi": avg_rssi,
                         "p_c": p_c,
-                        "retry_rate": retry_rate,
+                        "retry_rate": blended_retry, # Lưu vào JSON để Dashboard hiển thị
                         "airtime_util": airtime_util,
                         "sta_count": sta_count,
                         "hour": now.hour,
                         "minute": now.minute,
-                        "is_break_time": is_break_time
+                        "is_break_time": is_break_time,
+                        "debug_info": f"Int_Drops:{internet_p_c:.2f} | Loc_Drops:{local_p_c:.2f}"
                     }
                 
-                # Xuất file JSON
                 with open(self.processed_json_path, 'w') as f:
                     json.dump(final_json_data, f)
                 
-                # Dọn dẹp 'ngăn kéo' cho chu kỳ tiếp theo
                 self.ap_stats.clear()
 
     def start(self):
@@ -151,5 +162,5 @@ class MultiAPTelemetryETL:
 if __name__ == "__main__":
     node = MultiAPTelemetryETL(iface_mon="wlan0mon") 
     node.start()
-    print("[+] Trạm viễn thông Per-AP đang lắng nghe. Nhấn Ctrl+C để thoát.")
+    print("[+] Trạm Viễn Thông Nhận Thức Luồng (Traffic-Aware) đang chạy...")
     while True: time.sleep(1)
