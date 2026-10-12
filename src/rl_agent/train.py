@@ -1,25 +1,47 @@
-# File: src/rl_agent/train.py
-import sys
 import os
-# Đưa thư mục gốc vào đường dẫn để Python nhận diện thư mục src
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+import logging
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from dotenv import load_dotenv
 
-from src.envs.wifi_env import WiFiEnv
-from stable_baselines3 import PPO # Dùng thuật toán Proximal Policy Optimization
+# Import Môi trường Thực tế
+from src.envs.real_router_env import RealRouterEnv
 
-def train_simulated_ai():
-    print("[*] Khởi tạo Môi trường Giả lập (Simulation Environment)...")
-    env = WiFiEnv(router_ip="offline", username="mock", password="mock")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+load_dotenv()
+ROUTER_IP = os.getenv("ROUTER_IP", "192.168.1.1")
+USER = os.getenv("ROUTER_USER", "root")
+PWD = os.getenv("ROUTER_PASS")
+
+PRETRAINED_MODEL_PATH = "saved_models/best_model.zip"
+FINE_TUNED_MODEL_PATH = "saved_models/best_model_real_world.zip"
+
+def main():
+    print("==========================================================")
+    print(" 🚀 KHKT 2026: KHỞI ĐỘNG FINE-TUNING TRÊN PHẦN CỨNG THẬT")
+    print("==========================================================")
     
-    print("[*] Khởi tạo Mô hình RL (Thuật toán PPO)...")
-    # Đưa môi trường vào thuật toán PPO. MultiInputPolicy dành cho state dạng Box/Dict
-    model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.0005)
+    if not os.path.exists(PRETRAINED_MODEL_PATH):
+        logging.critical("Không tìm thấy mô hình gốc. Hãy train trên Colab trước (train_offline.py)!")
+        return
+
+    # Khởi tạo Testbed Env
+    env = RealRouterEnv(target_ap_ip=ROUTER_IP, router_user=USER, router_pass=PWD)
     
-    print("[*] Bắt đầu tôi luyện AI (Training) trên 50,000 steps...")
-    model.learn(total_timesteps=50000)
+    # LOAD MÔ HÌNH CŨ
+    logging.info("Đang nạp 'bộ não' Colab vào Môi trường Thực tế...")
+    model = PPO.load(PRETRAINED_MODEL_PATH, env=env, device='cpu')
+
+    # FINE-TUNING (HỌC BỔ SUNG)
+    logging.info("Bắt đầu học tăng cường trên môi trường thật (Sẽ mất thời gian do phải chờ mạng Wi-Fi thực...).")
+    # Lưu ý: 500 steps x 30 giây/step = khoảng 4 tiếng chạy thực tế.
+    # Trong buổi test demo, bạn có thể chỉnh xuống 50 steps để kiểm tra luồng.
+    model.learn(total_timesteps=50) 
     
-    print("[+] Hoàn tất! Lưu trí thông minh (Weights) vào thư mục saved_models/")
-    model.save("saved_models/ppo_wifi_optimizer_v1")
+    # LƯU MÔ HÌNH TỐI THƯỢNG
+    model.save(FINE_TUNED_MODEL_PATH)
+    logging.info(f"✅ ĐÃ LƯU MÔ HÌNH THỰC CHIẾN TẠI: {FINE_TUNED_MODEL_PATH}")
 
 if __name__ == "__main__":
-    train_simulated_ai()
+    main()

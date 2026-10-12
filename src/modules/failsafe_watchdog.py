@@ -170,3 +170,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+"""
+# Đặt là SONOFF khi ở phòng Lab, đặt là POE_SWITCH khi triển khai thật
+HARD_FAILSAFE_MODE="POE_SWITCH"
+
+# Nếu dùng PoE:
+SWITCH_IP="192.168.1.254"
+SWITCH_USER="admin"
+SWITCH_PASS="Admin123!"
+SWITCH_TYPE="cisco_ios" # Có thể là huawei, hp_procurve, v.v.
+ROUTER_POE_PORT="Gi1/0/1"
+"""
