@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+from typing import Any
 
 class UltimateDigitalTwinEnv(gym.Env):
     """
@@ -22,7 +23,7 @@ class UltimateDigitalTwinEnv(gym.Env):
         self.disaster_timer = 0
         self.disaster_type = 0 
 
-    def reset(self, seed=None, options=None):
+    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None,) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self.current_step = 0
         self.previous_action = None

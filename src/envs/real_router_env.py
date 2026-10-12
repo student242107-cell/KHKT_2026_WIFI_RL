@@ -1,5 +1,6 @@
 import gymnasium as gym
 from gymnasium import spaces
+from typing import Any
 import numpy as np
 import time
 import json
@@ -30,11 +31,10 @@ class RealRouterEnv(gym.Env):
         self.max_steps = 100 # Chạy thực tế chỉ cần fine-tune số vòng nhỏ
         self.previous_action = None
 
-    def reset(self, seed=None, options=None):
+    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None,) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self.current_step = 0
         self.previous_action = None
-        # Đợi lấy State thực tế từ hệ thống Telemetry
         return self._get_real_state(), {}
 
     def _get_real_state(self):
