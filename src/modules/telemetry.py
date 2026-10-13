@@ -7,6 +7,7 @@ import numpy as np
 from scapy.all import sniff
 from scapy.layers.dot11 import Dot11
 from datetime import datetime
+import csv
 
 # Địa chỉ MAC của cổng Default Gateway (Cổng nối ra Internet của trường)
 # Bạn nhớ sửa thành MAC của cổng WAN/LAN Router của bạn nhé!
@@ -18,9 +19,18 @@ class MultiAPTelemetryETL:
         self.raw_tshark_path = "data/raw/tshark_raw.txt"
         self.processed_json_path = "data/processed/per_ap_state.json"
         
+        # [THÊM MỚI] Đường dẫn lưu dữ liệu lịch sử cho biểu đồ
+        self.history_csv_path = "data/processed/telemetry_history.csv" 
+        
         os.makedirs(os.path.dirname(self.raw_tshark_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.processed_json_path), exist_ok=True)
         
+        # [THÊM MỚI] Tạo file CSV và ghi tiêu đề nếu file chưa tồn tại
+        if not os.path.exists(self.history_csv_path):
+            with open(self.history_csv_path, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(["Timestamp", "Hour", "Minute", "AP_MAC", "avg_rssi", "p_c", "retry_rate", "airtime_util", "sta_count"])
+                
         # Ngăn kéo hồ sơ bệnh án cho từng AP (BSSID)
         self.ap_stats = {}
         self.lock = threading.Lock()
@@ -149,9 +159,29 @@ class MultiAPTelemetryETL:
                         "debug_info": f"Int_Drops:{internet_p_c:.2f} | Loc_Drops:{local_p_c:.2f}"
                     }
                 
+                # Xuất file JSON (Cho AI đọc Real-time)
                 with open(self.processed_json_path, 'w') as f:
                     json.dump(final_json_data, f)
                 
+                # [THÊM MỚI] Ghi nối tiếp (Append) dữ liệu vào file CSV (Cho EDA vẽ biểu đồ)
+                with open(self.history_csv_path, mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    for bssid, data in final_json_data.items():
+                        writer.writerow([
+                            timestamp_str,          # Thời gian ghi nhận
+                            data["hour"],           # Giờ
+                            data["minute"],         # Phút
+                            bssid,                  # Tên/MAC của AP
+                            f"{data['avg_rssi']:.2f}", # Cường độ tín hiệu
+                            f"{data['p_c']:.4f}",      # Xác suất va chạm
+                            f"{data['retry_rate']:.4f}",# Tỷ lệ rớt gói
+                            f"{data['airtime_util']:.4f}",# Tỷ lệ chiếm dụng Airtime
+                            data["sta_count"]       # Số Client
+                        ])
+                
+                # Dọn dẹp 'ngăn kéo' cho chu kỳ tiếp theo
                 self.ap_stats.clear()
 
     def start(self):

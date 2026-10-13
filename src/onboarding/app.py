@@ -32,7 +32,7 @@ LOGIN_TEMPLATE = """
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cổng Xác Thực</title>
+    <title>Cổng Xác Thực Cho Mạng Onboarding</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 90%; }
@@ -45,7 +45,7 @@ LOGIN_TEMPLATE = """
 </head>
 <body>
     <div class="card">
-        <h2>MẠNG KHKT 2026</h2>
+        <h2>MẠNG Onboarding - DỰ ÁN KHKT 2026</h2>
         <p>Vui lòng đăng nhập để hệ thống tự động đăng ký thiết bị (Zero-Touch).</p>
         <form method="POST" action="/">
             <input type="text" name="gv_id" placeholder="Mã số Giáo viên (VD: GV001)" required>
