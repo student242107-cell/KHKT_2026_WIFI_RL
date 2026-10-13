@@ -63,15 +63,18 @@ class UltimateDigitalTwinEnv(gym.Env):
         p_c = min(1.0, p_c)
         actual_throughput = base_throughput * (1.0 - p_c)
         
-        # Hàm Reward Phạt Phi tuyến tính (KHKT M>>N)
-        # Ép độ trễ (đại diện bởi p_c) phải cực thấp, nếu không phạt bình phương
-        base_reward = actual_throughput - (500.0 * (p_c ** 2)) 
+        # --- 3. CẢI TIẾN: REWARD SCALING KẾT HỢP EXPONENTIAL PENALTY ---
+        norm_throughput = actual_throughput / 100.0
+        # Giữ lại bình phương (p_c ** 2) để trừng phạt cấp số nhân khi rớt gói cao
+        penalty_collision = 5.0 * (p_c ** 2) 
         
-        # Hysteresis (Chống Ping-pong)
+        base_reward = norm_throughput - penalty_collision 
+        
+        # Hysteresis (Chống Ping-pong) đã được scale về dải nhỏ
         action_penalty = 0.0
         if self.previous_action is not None:
-            if channel_idx != self.previous_action[0]: action_penalty -= 5.0 
-            if bw_idx != self.previous_action[1]: action_penalty -= 3.0
+            if channel_idx != self.previous_action[0]: action_penalty -= 0.5 
+            if bw_idx != self.previous_action[1]: action_penalty -= 0.3
                 
         self.previous_action = action.copy()
         final_reward = base_reward + action_penalty
@@ -80,3 +83,39 @@ class UltimateDigitalTwinEnv(gym.Env):
         terminated = bool(self.current_step >= self.max_steps)
         
         return state, float(final_reward), terminated, False, {}
+    
+    def simulate_future(self, current_real_state, action):
+        """
+        HÀM TIÊN TRI (WHAT-IF ENGINE): 
+        Dự đoán điểm thưởng (Reward) của mạng nếu áp dụng Action này vào thực tế.
+        """
+        channel_idx, bw_idx = action[0], action[1]
+        
+        # Bóc tách DỮ LIỆU THẬT từ Router truyền lên thay vì random
+        actual_sta = current_real_state[4] # Số lượng thiết bị thực tế
+        
+        # Phương trình suy luận vật lý
+        noise_level = 0.1 if channel_idx == 0 else (0.2 if channel_idx == 1 else 0.4)
+        base_throughput = 50.0 if bw_idx == 0 else (100.0 if bw_idx == 1 else 200.0)
+        
+        p_c = noise_level + (actual_sta * 0.005)
+        
+        # Mô phỏng bão Roaming làm sập mạng nếu băng thông quá lớn
+        if bw_idx == 2 and actual_sta > 100: p_c += 0.5 
+        elif bw_idx == 1 and actual_sta > 100: p_c += 0.2
+            
+        p_c = min(1.0, p_c)
+        actual_throughput = base_throughput * (1.0 - p_c)
+        
+        # --- CHUẨN HÓA ĐỒNG BỘ VỚI HÀM STEP ---
+        norm_throughput = actual_throughput / 100.0
+        penalty_collision = 5.0 * (p_c ** 2)
+        expected_reward = norm_throughput - penalty_collision
+        
+        # Hysteresis (Chống Ping-pong)
+        action_penalty = 0.0
+        if self.previous_action is not None:
+            if channel_idx != self.previous_action[0]: action_penalty -= 0.5
+            if bw_idx != self.previous_action[1]: action_penalty -= 0.3
+                
+        return expected_reward + action_penalty

@@ -4,11 +4,13 @@ import logging
 import os
 import json
 import argparse
-import yaml # THÊM DÒNG NÀY
+import yaml 
 from dotenv import load_dotenv
 from stable_baselines3 import PPO
 
 from src.modules import wifi_actuators as actuators 
+# --- IMPORT DIGITAL TWIN ĐỂ LÀM NHÀ TIÊN TRI ---
+from src.envs.digital_twin_env import UltimateDigitalTwinEnv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -16,26 +18,23 @@ load_dotenv()
 USER = os.getenv("ROUTER_USER", "root")
 PWD = os.getenv("ROUTER_PASS")
 MODEL_PATH = "saved_models/best_model.zip"
-CONFIG_PATH = "configs/network_config.yaml" # ĐƯỜNG DẪN TỚI FILE YAML
+CONFIG_PATH = "configs/network_config.yaml" 
 
 # --- HÀM TỰ ĐỘNG NẠP BẢN ĐỒ MẠNG TỪ YAML ---
 def load_ap_map():
     try:
         with open(CONFIG_PATH, 'r') as file:
             config = yaml.safe_load(file)
-            # Trích xuất từ điển ap_map ra
             return config.get('network_topology', {}).get('ap_map', {})
     except Exception as e:
         logging.error(f"Lỗi đọc file cấu hình mạng {CONFIG_PATH}: {e}")
         return {}
 
-# Gọi hàm để lấy danh sách AP
 AP_MAP = load_ap_map()
 if not AP_MAP:
     logging.critical("Không có thông tin AP nào trong file YAML. Hãy chạy scripts/auto_discover_aps.py trước!")
     exit(1)
 
-# In ra màn hình để kiểm chứng
 logging.info(f"Đã nạp bản đồ mạng: Tối ưu hóa cho {len(AP_MAP)} điểm phát sóng (APs).")
 
 parser = argparse.ArgumentParser(description='Cognitive Wi-Fi HIL Agent')
@@ -57,12 +56,9 @@ BEACON_INTS = [80, 300]
 OBSS_PD_LEVELS = [-82, -77, -72, -67, -62] 
 PROCESSED_DATA_PATH = "data/processed/per_ap_state.json"
 
-# Biến toàn cục để tránh việc AI gửi lệnh SSH liên tục nếu môi trường không đổi
 previous_actions = {}
 
-
 def get_per_ap_states():
-    """Đọc file JSON và trả về từ điển chứa State của từng AP."""
     if not os.path.exists(PROCESSED_DATA_PATH):
         logging.warning("Chưa có dữ liệu Telemetry. Trả về rỗng.")
         return {}
@@ -73,14 +69,13 @@ def get_per_ap_states():
             
         states = {}
         for bssid, data in json_data.items():
-            # Chỉ lấy các BSSID thuộc về hệ thống trường học của mình (bỏ qua mạng nhà hàng xóm)
             if bssid.upper() in AP_MAP:
                 state_array = np.array([
                     data["avg_rssi"],
                     data["p_c"],
                     data["retry_rate"],
                     data["airtime_util"],
-                    data["sta_count"], # Số Client kết nối vào riêng AP này
+                    data["sta_count"], 
                     data["hour"],
                     data["minute"],
                     data["is_break_time"]
@@ -99,11 +94,7 @@ def get_per_ap_states():
         logging.error(f"Lỗi đọc JSON State: {e}")
         return {}
 
-
 def execute_ai_action_for_ap(target_ip, action_array):
-    """
-    Biên dịch mảng Action và gửi lệnh SSH ĐẾN ĐÚNG CỤC AP bị sự cố.
-    """
     ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
     
     target_channel = CHANNELS[ch_idx]
@@ -115,7 +106,6 @@ def execute_ai_action_for_ap(target_ip, action_array):
     
     logging.info(f"👉 Kê đơn cho AP {target_ip}: CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm")
 
-    # KÊ ĐƠN THUỐC ĐÍCH DANH (Gửi tham số target_ip vào các hàm SSH)
     actuators.adaptive_bandwidth_fallback(target_ip, USER, PWD, TARGET_RADIO, target_bw)
     actuators.optimize_tx_power(target_ip, USER, PWD, TARGET_IFACE, target_tx)
     actuators.apply_mcs_ceiling([target_ip], USER, PWD, TARGET_IFACE, mcs_limit=mcs_idx)
@@ -124,38 +114,47 @@ def execute_ai_action_for_ap(target_ip, action_array):
 
 def main():
     print("=========================================================")
-    print(f"   HIL AGENT - CHẾ ĐỘ 'BÁC SĨ TỪNG PHÒNG' ({args.band})  ")
+    print(f"   HIL AGENT - TÍCH HỢP PREDICTIVE GUARDRAIL ({args.band}) ")
     print("=========================================================")
     
     try:
         model = PPO.load(MODEL_PATH)
+        # --- KHỞI TẠO DIGITAL TWIN LÀM NHÀ TIÊN TRI ---
+        oracle_twin = UltimateDigitalTwinEnv()
     except Exception as e:
-        logging.critical(f"[X] Không tìm thấy file trọng số: {e}")
+        logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")
         return
     
     while True:
         try:
-            # 1. Bác sĩ cầm bệnh án của tất cả các phòng lên
             per_ap_states = get_per_ap_states()
             
-            # 2. Khám từng phòng một
             for bssid, state in per_ap_states.items():
-                target_ip = AP_MAP[bssid] # Ánh xạ MAC sang IP để biết đường truyền SSH
+                target_ip = AP_MAP[bssid] 
                 logging.info(f"📊 Khám AP {target_ip} (Clients={int(state[4])}, p_c={state[1]:.2f})")
                 
-                # 3. Não bộ PPO đưa ra quyết định (Toa thuốc) cho phòng này
+                # Não bộ PPO đưa ra đề xuất cấu hình
                 action, _ = model.predict(state, deterministic=True)
                 
-                # 4. Kiểm tra xem phòng này có cần uống thuốc mới không?
                 prev_action = previous_actions.get(bssid)
                 if prev_action is None or not np.array_equal(action, prev_action):
-                    logging.warning(f"⚠️ AP {target_ip} có sự cố hoặc cần tối ưu. Đang kê đơn thuốc...")
-                    execute_ai_action_for_ap(target_ip, action)
-                    previous_actions[bssid] = action.copy() # Lưu lại toa thuốc đã uống
-                else:
-                    pass # Phòng vẫn ổn, giữ nguyên phác đồ cũ.
                     
-            time.sleep(30) # 30 giây sau đi khám lại một vòng
+                    # --- VẬN HÀNH "SIMULATED GUARDRAIL" ĐỂ BẢO VỆ MẠNG ---
+                    oracle_twin.previous_action = prev_action
+                    expected_reward = oracle_twin.simulate_future(state, action)
+                    
+                    logging.info(f"   [Oracle] Điểm thưởng dự đoán tương lai: {expected_reward:.2f}")
+                    
+                    if expected_reward < 0.0:
+                        logging.warning(f"   [CẢNH BÁO] Oracle phủ quyết lệnh này! Rủi ro quá tải mạng. Giữ nguyên cấu hình cũ.")
+                    else:
+                        logging.info(f"   ✅ Lệnh an toàn. Đang kê đơn thuốc...")
+                        execute_ai_action_for_ap(target_ip, action)
+                        previous_actions[bssid] = action.copy() 
+                else:
+                    pass 
+                    
+            time.sleep(30) 
             
         except KeyboardInterrupt:
             print(f"\n[+] Đã dừng HIL Agent ({args.band}).")
