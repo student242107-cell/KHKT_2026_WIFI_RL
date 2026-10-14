@@ -3,19 +3,154 @@ import os
 import time
 import threading
 import re
+import argparse
+import subprocess
 import numpy as np
 from scapy.all import sniff
-from scapy.layers.dot11 import Dot11
+from scapy.layers.dot11 import Dot11, Dot11Beacon
 from datetime import datetime
 import csv
+
+CHANNELS = (1, 6, 11, 36, 40, 44, 48)
+CHANNEL_SCAN_SECONDS = 30
+CHANNEL_DWELL_SECONDS = 0.5
+HISTORY_COLUMNS = [
+    "Timestamp", "Hour", "Minute", "AP_MAC", "avg_rssi", "p_c",
+    "retry_rate", "airtime_util", "sta_count", "Zone",
+]
+LEGACY_HISTORY_COLUMNS = HISTORY_COLUMNS[:-1]
 
 # Địa chỉ MAC của cổng Default Gateway (Cổng nối ra Internet của trường)
 # Bạn nhớ sửa thành MAC của cổng WAN/LAN Router của bạn nhé!
 GATEWAY_MAC = "00:15:5d:d8:73:d3".upper()
 
-class MultiAPTelemetryETL:
-    def __init__(self, iface_mon="wlan0mon"):
+
+def select_active_channels(beacon_counts, channels=CHANNELS, max_channels=2):
+    """Trả về tối đa hai kênh có nhiều beacon nhất, ổn định khi số beacon hòa."""
+    channel_order = {channel: index for index, channel in enumerate(channels)}
+    active = [
+        channel for channel in channels
+        if beacon_counts.get(channel, 0) > 0
+    ]
+    return sorted(
+        active,
+        key=lambda channel: (-beacon_counts[channel], channel_order[channel]),
+    )[:max_channels]
+
+
+class SmartChannelHopper:
+    """
+    Cơ chế Tự động Khóa Kênh Đông Nhất (Active Channel Pinning).
+
+    Giai đoạn 1 - Quét Khám phá (Discovery Scan):
+        30 giây đầu tiên, quét nhanh qua tất cả 7 kênh (1, 6, 11, 36, 40, 44, 48)
+        để phát hiện các AP đang phát beacon ở kênh nào.
+
+    Giai đoạn 2 - Khóa Kênh (Channel Pinning):
+        Chỉ nhảy luân phiên giữa tối đa 2 kênh có nhiều beacon nhất,
+        bỏ qua các kênh trống hoàn toàn.
+
+    Hiệu quả:
+        Mật độ dữ liệu bắt được trên đơn vị thời gian tăng gấp 3.5 lần
+        so với việc nhảy đều 7 kênh, bắt trọn từng nhịp giật lag (Micro-spikes).
+    """
+
+    def __init__(self, iface_mon, all_channels=CHANNELS,
+                 scan_duration=CHANNEL_SCAN_SECONDS,
+                 dwell_time=CHANNEL_DWELL_SECONDS):
         self.iface_mon = iface_mon
+        self.all_channels = list(all_channels)
+        self.scan_duration = scan_duration
+        self.dwell_time = dwell_time
+
+        # Bộ đếm beacon cho mỗi kênh trong giai đoạn quét
+        self._beacon_counts = {ch: 0 for ch in self.all_channels}
+        self._lock = threading.Lock()
+
+        # Trạng thái hiện tại
+        self._phase = "discovery"        # "discovery" hoặc "pinned"
+        self._pinned_channels = []       # Kênh đã khóa sau giai đoạn quét
+        self._current_channel = None     # Kênh đang tune hiện tại
+
+    @property
+    def phase(self):
+        return self._phase
+
+    @property
+    def pinned_channels(self):
+        return list(self._pinned_channels)
+
+    @property
+    def current_channel(self):
+        return self._current_channel
+
+    def record_beacon(self, channel):
+        """Ghi nhận 1 beacon được bắt trên kênh đang tune (gọi từ sniffer callback)."""
+        with self._lock:
+            if self._phase == "discovery" and channel in self._beacon_counts:
+                self._beacon_counts[channel] += 1
+
+    def _set_channel(self, ch):
+        """Chuyển card sang kênh ch và cập nhật trạng thái."""
+        os.system(f"iwconfig {self.iface_mon} channel {ch}")
+        self._current_channel = ch
+
+    def run(self):
+        """
+        Vòng lặp chính của Smart Channel Hopper (chạy trong daemon thread).
+
+        ─── Phase 1: Discovery Scan (30 giây) ───
+        Nhảy qua tất cả 7 kênh, mỗi kênh dừng 0.5s.
+        Sau 30 giây, chọn tối đa 2 kênh đông beacon nhất.
+
+        ─── Phase 2: Channel Pinning (vĩnh viễn) ───
+        Chỉ nhảy giữa các kênh đã khóa.
+        """
+        print(f"[📡] Smart Channel Hopper khởi động trên {self.iface_mon}")
+        print(f"[📡] Phase 1: Discovery Scan — quét {len(self.all_channels)} kênh "
+              f"trong {self.scan_duration}s...")
+
+        # ─── Phase 1: Discovery Scan ───
+        scan_start = time.time()
+        while (time.time() - scan_start) < self.scan_duration:
+            for ch in self.all_channels:
+                if (time.time() - scan_start) >= self.scan_duration:
+                    break
+                self._set_channel(ch)
+                time.sleep(self.dwell_time)
+
+        # Chọn kênh đông nhất
+        with self._lock:
+            self._pinned_channels = select_active_channels(
+                self._beacon_counts, self.all_channels
+            )
+            self._phase = "pinned"
+
+        # Fallback: nếu không phát hiện kênh nào → giữ nguyên tất cả 7 kênh
+        if not self._pinned_channels:
+            self._pinned_channels = list(self.all_channels)
+            print(f"[⚠️] Không phát hiện beacon nào! Giữ nguyên {len(self.all_channels)} kênh.")
+        else:
+            print(f"[✅] Phase 2: Channel Pinning — khóa kênh: {self._pinned_channels}")
+            beacon_summary = ", ".join(
+                f"CH{ch}: {self._beacon_counts[ch]} beacons"
+                for ch in self.all_channels if self._beacon_counts[ch] > 0
+            )
+            print(f"     Kết quả quét: {beacon_summary}")
+            ratio = len(self.all_channels) / len(self._pinned_channels)
+            print(f"     Mật độ dữ liệu tăng ~{ratio:.1f}x so với quét đều {len(self.all_channels)} kênh!")
+
+        # ─── Phase 2: Channel Pinning (vĩnh viễn) ───
+        while True:
+            for ch in self._pinned_channels:
+                self._set_channel(ch)
+                time.sleep(self.dwell_time)
+
+
+class MultiAPTelemetryETL:
+    def __init__(self, iface_mon="wlan0mon", zone="Unspecified"):
+        self.iface_mon = iface_mon
+        self.zone = zone
         self.raw_tshark_path = "data/raw/tshark_raw.txt"
         self.processed_json_path = "data/processed/per_ap_state.json"
         
@@ -25,15 +160,45 @@ class MultiAPTelemetryETL:
         os.makedirs(os.path.dirname(self.raw_tshark_path), exist_ok=True)
         os.makedirs(os.path.dirname(self.processed_json_path), exist_ok=True)
         
-        # [THÊM MỚI] Tạo file CSV và ghi tiêu đề nếu file chưa tồn tại
-        if not os.path.exists(self.history_csv_path):
-            with open(self.history_csv_path, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(["Timestamp", "Hour", "Minute", "AP_MAC", "avg_rssi", "p_c", "retry_rate", "airtime_util", "sta_count"])
-                
+        self._ensure_history_csv()
+
         # Ngăn kéo hồ sơ bệnh án cho từng AP (BSSID)
         self.ap_stats = {}
         self.lock = threading.Lock()
+
+        # Smart Channel Hopper
+        self._hopper = SmartChannelHopper(
+            iface_mon=self.iface_mon,
+            all_channels=CHANNELS,
+            scan_duration=CHANNEL_SCAN_SECONDS,
+            dwell_time=CHANNEL_DWELL_SECONDS,
+        )
+
+    def _ensure_history_csv(self):
+        """Tạo CSV mới hoặc thêm cột Zone cho dữ liệu lịch sử cũ."""
+        if not os.path.exists(self.history_csv_path) or os.path.getsize(self.history_csv_path) == 0:
+            with open(self.history_csv_path, mode="w", newline="") as file:
+                csv.writer(file).writerow(HISTORY_COLUMNS)
+            return
+
+        with open(self.history_csv_path, mode="r", newline="") as source:
+            reader = csv.reader(source)
+            existing_columns = next(reader, None)
+            if existing_columns == HISTORY_COLUMNS:
+                return
+            if existing_columns != LEGACY_HISTORY_COLUMNS:
+                raise ValueError(
+                    f"Không thể cập nhật header CSV không được hỗ trợ: {existing_columns}"
+                )
+
+            temp_path = f"{self.history_csv_path}.tmp"
+            with open(temp_path, mode="w", newline="") as destination:
+                writer = csv.writer(destination)
+                writer.writerow(HISTORY_COLUMNS)
+                for row in reader:
+                    writer.writerow(row + [""])
+
+        os.replace(temp_path, self.history_csv_path)
 
     def _parse_mac_frame(self, pkt):
         """Hàm chuẩn mực IEEE 802.11 để bóc tách địa chỉ MAC dựa trên ToDS/FromDS"""
@@ -60,8 +225,18 @@ class MultiAPTelemetryETL:
 
     def _scapy_handler(self, pkt):
         """Bóc tách gói tin: Phân phòng (AP) và Phân bệnh (Internet/Local)"""
-        if pkt.haslayer(Dot11) and pkt.type == 2: # Chỉ xét Data Frame
-            
+        if not pkt.haslayer(Dot11):
+            return
+
+        # ─── Ghi nhận Beacon cho Smart Channel Hopper ───
+        if pkt.haslayer(Dot11Beacon):
+            current_ch = self._hopper.current_channel
+            if current_ch is not None:
+                self._hopper.record_beacon(current_ch)
+            return  # Beacon không phải Data frame, bỏ qua
+
+        # ─── Xử lý Data Frame như cũ ───
+        if pkt.type == 2:  # Chỉ xét Data Frame
             bssid, src_mac, dst_mac = self._parse_mac_frame(pkt)
             
             # Bỏ qua nếu không rõ BSSID
@@ -94,14 +269,6 @@ class MultiAPTelemetryETL:
                     self.ap_stats[bssid]["rssi_list"].append(pkt.dBm_AntSignal)
                 if src_mac and src_mac != GATEWAY_MAC and src_mac != bssid:
                     self.ap_stats[bssid]["clients"].add(src_mac)
-
-    def _channel_hopper(self, channels=[36, 40, 44, 48, 1, 6, 11]):
-        """Radar quét dải tần"""
-        print(f"[*] Radar Channel Hopper kích hoạt trên {self.iface_mon}")
-        while True:
-            for ch in channels:
-                os.system(f"iwconfig {self.iface_mon} channel {ch}")
-                time.sleep(0.5) 
 
     def _parse_tshark_log(self):
         """(Tshark phần này giữ nguyên như trước)"""
@@ -156,6 +323,7 @@ class MultiAPTelemetryETL:
                         "hour": now.hour,
                         "minute": now.minute,
                         "is_break_time": is_break_time,
+                        "zone": self.zone,  # Ghi nhãn khu vực vào JSON
                         "debug_info": f"Int_Drops:{internet_p_c:.2f} | Loc_Drops:{local_p_c:.2f}"
                     }
                 
@@ -178,19 +346,88 @@ class MultiAPTelemetryETL:
                             f"{data['p_c']:.4f}",      # Xác suất va chạm
                             f"{data['retry_rate']:.4f}",# Tỷ lệ rớt gói
                             f"{data['airtime_util']:.4f}",# Tỷ lệ chiếm dụng Airtime
-                            data["sta_count"]       # Số Client
+                            data["sta_count"],      # Số Client
+                            self.zone,              # Khu vực (Zone)
                         ])
                 
                 # Dọn dẹp 'ngăn kéo' cho chu kỳ tiếp theo
                 self.ap_stats.clear()
 
     def start(self):
-        threading.Thread(target=self._channel_hopper, daemon=True).start()
-        threading.Thread(target=lambda: sniff(iface=self.iface_mon, prn=self._scapy_handler, store=0), daemon=True).start()
+        # Khởi chạy Smart Channel Hopper thay vì channel hopper cũ
+        threading.Thread(target=self._hopper.run, daemon=True).start()
+        threading.Thread(target=lambda: sniff(
+            iface=self.iface_mon, prn=self._scapy_handler, store=0
+        ), daemon=True).start()
         threading.Thread(target=self.etl_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    node = MultiAPTelemetryETL(iface_mon="wlan0mon") 
+    parser = argparse.ArgumentParser(
+        description="📡 Trạm Viễn Thông Nhận Thức Luồng (Traffic-Aware Telemetry)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+╔══════════════════════════════════════════════════════════════╗
+║  VÍ DỤ SỬ DỤNG:                                           ║
+║                                                              ║
+║  # Thu thập dữ liệu tại Thư viện                            ║
+║  sudo python src/modules/telemetry.py --zone ThuVien         ║
+║                                                              ║
+║  # Thu thập dữ liệu tại Phòng học A101                      ║
+║  sudo python src/modules/telemetry.py --zone PhongHoc_A101   ║
+║                                                              ║
+║  # Thu thập dữ liệu tại Căng-tin                            ║
+║  sudo python src/modules/telemetry.py --zone CangTin         ║
+║                                                              ║
+║  # Thu thập dữ liệu tại Hành lang                           ║
+║  sudo python src/modules/telemetry.py --zone HanhLang        ║
+║                                                              ║
+║  # Chỉ định interface và thời gian quét kênh                 ║
+║  sudo python src/modules/telemetry.py --zone ThuVien \\       ║
+║       --iface wlan1mon --scan-time 45                        ║
+╚══════════════════════════════════════════════════════════════╝
+""",
+    )
+
+    parser.add_argument(
+        "--zone", type=str, default="Unspecified",
+        help="Tên khu vực đang thu thập dữ liệu "
+             "(VD: ThuVien, PhongHoc_A101, CangTin, HanhLang). "
+             "Giá trị này sẽ được ghi vào cột 'Zone' trong telemetry_history.csv "
+             "để phân biệt dữ liệu giữa các khu vực trên Heatmap.",
+    )
+    parser.add_argument(
+        "--iface", type=str, default="wlan0mon",
+        help="Tên interface Wi-Fi ở chế độ Monitor (mặc định: wlan0mon)",
+    )
+    parser.add_argument(
+        "--scan-time", type=int, default=CHANNEL_SCAN_SECONDS,
+        help=f"Thời gian quét khám phá kênh ban đầu, tính bằng giây "
+             f"(mặc định: {CHANNEL_SCAN_SECONDS}s). Sau thời gian này, "
+             f"hệ thống sẽ tự khóa vào các kênh đông nhất.",
+    )
+
+    args = parser.parse_args()
+
+    # Ghi đè scan_duration nếu người dùng chỉ định
+    CHANNEL_SCAN_SECONDS = args.scan_time
+
+    print("╔══════════════════════════════════════════════════════════╗")
+    print("║  📡 TRẠM VIỄN THÔNG NHẬN THỨC LUỒNG (Traffic-Aware)   ║")
+    print("║  🧠 Smart Channel Hopper + Zone Tagging                ║")
+    print("╠══════════════════════════════════════════════════════════╣")
+    print(f"║  🏫 Zone      : {args.zone:<40} ║")
+    print(f"║  📶 Interface : {args.iface:<40} ║")
+    print(f"║  ⏱️  Scan Time : {args.scan_time}s{' ' * (39 - len(str(args.scan_time)))} ║")
+    print("╠══════════════════════════════════════════════════════════╣")
+    print("║  Cơ chế: 30s quét 7 kênh → Khóa ≤2 kênh đông nhất    ║")
+    print("║  Hiệu quả: Mật độ dữ liệu tăng ~3.5x                 ║")
+    print("╚══════════════════════════════════════════════════════════╝")
+
+    node = MultiAPTelemetryETL(iface_mon=args.iface, zone=args.zone)
     node.start()
-    print("[+] Trạm Viễn Thông Nhận Thức Luồng (Traffic-Aware) đang chạy...")
-    while True: time.sleep(1)
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n[🛑] Dừng thu thập tại zone '{args.zone}'. Dữ liệu đã lưu vào CSV.")
