@@ -11,7 +11,6 @@ import yaml
 import paramiko
 from dotenv import load_dotenv
 
-# Chỉ import Scapy khi cần hoặc giữ sẵn cho chế độ Monitor Mode
 from scapy.all import sniff
 from scapy.layers.dot11 import Dot11, Dot11Beacon
 
@@ -31,7 +30,6 @@ CONFIG_PATH = "configs/network_config.yaml"
 
 
 def select_active_channels(beacon_counts, channels=CHANNELS, max_channels=2):
-    """Trả về tối đa hai kênh có nhiều beacon nhất, ổn định khi số beacon hòa."""
     channel_order = {channel: index for index, channel in enumerate(channels)}
     active = [
         channel for channel in channels
@@ -44,7 +42,7 @@ def select_active_channels(beacon_counts, channels=CHANNELS, max_channels=2):
 
 
 class SmartChannelHopper:
-    """Cơ chế Tự động Khóa Kênh Đông Nhất (Active Channel Pinning) cho --mode scapy."""
+    """Cơ chế Tự động Khóa Kênh Đông Nhất cho --mode scapy."""
 
     def __init__(self, iface_mon, all_channels=CHANNELS,
                  scan_duration=CHANNEL_SCAN_SECONDS,
@@ -101,12 +99,10 @@ class SmartChannelHopper:
 
 
 class MultiAPTelemetryETL:
-    def __init__(self, mode="openwrt", iface_mon="wlan0mon", zone="Unspecified",
-                 openwrt_iface="phy1-ap0", poll_interval=3):
+    def __init__(self, mode="openwrt", iface_mon="wlan0mon", zone="Unspecified", poll_interval=3):
         self.mode = mode
         self.iface_mon = iface_mon
         self.zone = zone
-        self.openwrt_iface = openwrt_iface
         self.poll_interval = poll_interval
 
         self.raw_tshark_path = "data/raw/tshark_raw.txt"
@@ -120,10 +116,9 @@ class MultiAPTelemetryETL:
         self.ap_stats = {}
         self.lock = threading.Lock()
 
-        # Biến phục vụ chế độ OpenWrt Direct Polling (Lưu bộ đếm kỳ trước để tính Delta)
         self.router_user = os.getenv("ROUTER_USER", "root")
         self.router_pass = os.getenv("ROUTER_PASS", "")
-        self.ap_map = self._load_ap_map()
+        self.nodes = self._load_nodes_from_yaml()
         self.prev_openwrt_counters = {}
 
         if self.mode == "scapy":
@@ -134,16 +129,28 @@ class MultiAPTelemetryETL:
                 dwell_time=CHANNEL_DWELL_SECONDS,
             )
 
-    def _load_ap_map(self):
+    def _load_nodes_from_yaml(self):
+        """Đọc danh sách toàn bộ các Node (cả 2.4GHz và 5GHz) từ configs/network_config.yaml."""
         if not os.path.exists(CONFIG_PATH):
-            return {}
+            return []
         try:
             with open(CONFIG_PATH, "r") as f:
                 cfg = yaml.safe_load(f)
-                return {k.upper(): v for k, v in cfg.get("network_topology", {}).get("ap_map", {}).items()}
+                topo = cfg.get("network_topology", {})
+                nodes = topo.get("nodes", [])
+                if nodes:
+                    return nodes
+
+                # Fallback nếu file YAML cũ chỉ có ap_map và ap_map_2g
+                ip_dict = {}
+                for bssid, ip in topo.get("ap_map", {}).items():
+                    ip_dict.setdefault(ip, {"name": f"AP_{ip}", "ip": ip})["bssid_5g"] = bssid.upper()
+                for bssid, ip in topo.get("ap_map_2g", {}).items():
+                    ip_dict.setdefault(ip, {"name": f"AP_{ip}", "ip": ip})["bssid_2g"] = bssid.upper()
+                return list(ip_dict.values())
         except Exception as e:
             print(f"[!] Lỗi đọc {CONFIG_PATH}: {e}")
-            return {}
+            return []
 
     def _ensure_history_csv(self):
         if not os.path.exists(self.history_csv_path) or os.path.getsize(self.history_csv_path) == 0:
@@ -166,7 +173,6 @@ class MultiAPTelemetryETL:
                 os.replace(temp_path, self.history_csv_path)
 
     def _save_outputs(self, final_json_data, now):
-        """Hàm dùng chung cho cả 2 mode để xuất JSON và ghi nối CSV."""
         if not final_json_data:
             return
 
@@ -191,32 +197,15 @@ class MultiAPTelemetryETL:
                 ])
 
     # ==========================================================================
-    # NHÁNH 1: CHẾ ĐỘ OPENWRT KERNEL POLLING (--mode openwrt)
+    # NHÁNH 1: CHẾ ĐỘ OPENWRT DUAL-BAND POLLING (--mode openwrt)
+    # Tự động lấy cả 2.4GHz (phy0-ap0) và 5GHz (phy1-ap0) trong 1 lần SSH!
     # ==========================================================================
-    def _poll_single_openwrt_ap(self, bssid, ip):
-        """SSH vào OpenWrt lấy station dump & survey dump, tính Delta tức thời."""
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            ssh.connect(ip, username=self.router_user, password=self.router_pass, timeout=3)
-            cmd = (
-                f"iw dev {self.openwrt_iface} station dump; "
-                f"echo '===SURVEY==='; "
-                f"iw dev {self.openwrt_iface} survey dump"
-            )
-            _, stdout, _ = ssh.exec_command(cmd)
-            raw_out = stdout.read().decode("utf-8", errors="ignore")
-        except Exception as e:
-            print(f"[!] Lỗi SSH tới AP {ip} ({bssid}): {e}")
-            return None
-        finally:
-            ssh.close()
-
-        parts = raw_out.split("===SURVEY===")
+    def _parse_iface_section(self, bssid, band_label, section_text):
+        """Bóc tách station dump & survey dump cho 1 băng tần cụ thể."""
+        parts = section_text.split("===SURVEY===")
         station_raw = parts[0] if len(parts) > 0 else ""
         survey_raw = parts[1] if len(parts) > 1 else ""
 
-        # 1. Bóc tách Station Dump
         stations = re.findall(r"Station ([0-9a-fA-F:]{17})", station_raw)
         sta_count = len(stations)
 
@@ -227,7 +216,6 @@ class MultiAPTelemetryETL:
         tx_retries = sum(int(x) for x in re.findall(r"tx retries:\s*(\d+)", station_raw))
         tx_failed = sum(int(x) for x in re.findall(r"tx failed:\s*(\d+)", station_raw))
 
-        # 2. Bóc tách Survey Dump (Chỉ lấy kênh đang [in use])
         active_time, busy_time = 0, 0
         in_use_blocks = re.findall(
             r"Survey data from.*?\n(?:\t.*?\n)*?\tfrequency:.*?\[in use\]\n((?:\t.*?\n)+)",
@@ -241,7 +229,6 @@ class MultiAPTelemetryETL:
                 active_time = int(act_m.group(1))
                 busy_time = int(bsy_m.group(1))
 
-        # 3. Tính toán Delta (Biến thiên trong cửa sổ poll_interval giây vừa qua)
         prev = self.prev_openwrt_counters.get(bssid)
         self.prev_openwrt_counters[bssid] = {
             "tx_pkts": tx_pkts,
@@ -252,7 +239,7 @@ class MultiAPTelemetryETL:
         }
 
         if not prev:
-            return None  # Bỏ qua nhịp đầu tiên để làm mốc cơ sở (Baseline Counter)
+            return None  # Nhịp đầu tiên dùng làm mốc Baseline Counter
 
         d_pkts = max(1, tx_pkts - prev["tx_pkts"])
         d_retries = max(0, tx_retries - prev["tx_retries"])
@@ -260,7 +247,6 @@ class MultiAPTelemetryETL:
         d_active = max(1, active_time - prev["active_time"])
         d_busy = max(0, busy_time - prev["busy_time"])
 
-        # Công thức chuẩn hóa tầng MAC
         retry_rate = float(np.clip(d_retries / (d_pkts + d_retries), 0.0, 1.0))
         p_c = float(np.clip((d_retries + d_failed * 2.0) / (d_pkts + d_retries + d_failed), 0.0, 1.0))
         airtime_util = float(np.clip(d_busy / d_active, 0.0, 1.0))
@@ -271,19 +257,67 @@ class MultiAPTelemetryETL:
             "retry_rate": retry_rate,
             "airtime_util": airtime_util,
             "sta_count": sta_count,
-            "debug_info": f"d_pkts:{d_pkts} | d_ret:{d_retries} | d_fail:{d_failed} | CCA:{airtime_util:.2f}"
+            "band": band_label,
+            "debug_info": f"[{band_label}] d_pkts:{d_pkts} | d_ret:{d_retries} | d_fail:{d_failed} | CCA:{airtime_util:.2f}"
         }
 
+    def _poll_openwrt_node_dualband(self, node):
+        """Mở 1 phiên SSH duy nhất vào AP để lấy đồng thời cả 2.4GHz (phy0-ap0) và 5GHz (phy1-ap0)."""
+        ip = node["ip"]
+        bssid_2g = node.get("bssid_2g")
+        bssid_5g = node.get("bssid_5g")
+
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            ssh.connect(ip, username=self.router_user, password=self.router_pass, timeout=3)
+            cmd = (
+                "echo '===BAND_2G==='; "
+                "iw dev phy0-ap0 station dump 2>/dev/null; "
+                "echo '===SURVEY==='; "
+                "iw dev phy0-ap0 survey dump 2>/dev/null; "
+                "echo '===BAND_5G==='; "
+                "iw dev phy1-ap0 station dump 2>/dev/null; "
+                "echo '===SURVEY==='; "
+                "iw dev phy1-ap0 survey dump 2>/dev/null"
+            )
+            _, stdout, _ = ssh.exec_command(cmd)
+            raw_out = stdout.read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            print(f"[!] Lỗi SSH tới {node.get('name', ip)} ({ip}): {e}")
+            return {}
+        finally:
+            ssh.close()
+
+        results = {}
+        if "===BAND_5G===" in raw_out:
+            part_2g, part_5g = raw_out.split("===BAND_5G===", 1)
+            part_2g = part_2g.replace("===BAND_2G===", "")
+
+            if bssid_2g:
+                m2 = self._parse_iface_section(bssid_2g.upper(), "2.4G", part_2g)
+                if m2:
+                    results[bssid_2g.upper()] = m2
+            if bssid_5g:
+                m5 = self._parse_iface_section(bssid_5g.upper(), "5G", part_5g)
+                if m5:
+                    results[bssid_5g.upper()] = m5
+
+        return results
+
     def openwrt_polling_loop(self):
-        print(f"[*] OpenWrt Direct Telemetry đang chạy (Chu kỳ: {self.poll_interval}s, Iface: {self.openwrt_iface})...")
+        print(
+            f"[*] OpenWrt Dual-Band Telemetry (2.4GHz + 5GHz) đang chạy "
+            f"cho {len(self.nodes)} trạm phát (Chu kỳ: {self.poll_interval}s, Zone: {self.zone})..."
+        )
         while True:
             now = datetime.now()
             is_break_time = 1 if (now.minute in range(45, 60)) else 0
             final_json_data = {}
 
-            for bssid, ip in self.ap_map.items():
-                metrics = self._poll_single_openwrt_ap(bssid, ip)
-                if metrics:
+            for node in self.nodes:
+                node_metrics = self._poll_openwrt_node_dualband(node)
+                for bssid, metrics in node_metrics.items():
                     metrics.update({
                         "hour": now.hour,
                         "minute": now.minute,
@@ -292,16 +326,17 @@ class MultiAPTelemetryETL:
                     })
                     final_json_data[bssid] = metrics
                     print(
-                        f"[📊 OpenWrt] {bssid} ({ip}) | STAs: {metrics['sta_count']} | "
-                        f"RSSI: {metrics['avg_rssi']:.1f}dBm | p_c: {metrics['p_c']:.3f} | "
-                        f"Retry: {metrics['retry_rate']:.3f} | Airtime: {metrics['airtime_util']:.2%}"
+                        f"[📊 {metrics['band']:4}] {node.get('name', node['ip']):13} ({bssid}) | "
+                        f"STAs: {metrics['sta_count']} | RSSI: {metrics['avg_rssi']:.1f}dBm | "
+                        f"p_c: {metrics['p_c']:.3f} | Retry: {metrics['retry_rate']:.3f} | "
+                        f"Airtime: {metrics['airtime_util']:.2%}"
                     )
 
             self._save_outputs(final_json_data, now)
             time.sleep(self.poll_interval)
 
     # ==========================================================================
-    # NHÁNH 2: CHẾ ĐỘ SCAPY MONITOR MODE (--mode scapy - TP-Link Archer T2U Plus)
+    # NHÁNH 2: CHẾ ĐỘ SCAPY MONITOR MODE (--mode scapy)
     # ==========================================================================
     def _parse_mac_frame(self, pkt):
         dot11 = pkt.getlayer(Dot11)
@@ -423,15 +458,13 @@ class MultiAPTelemetryETL:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="📡 Dual-Mode Cognitive Wi-Fi Telemetry Engine")
+    parser = argparse.ArgumentParser(description="📡 Dual-Mode & Dual-Band Cognitive Wi-Fi Telemetry Engine")
     parser.add_argument(
         "--mode", type=str, choices=["openwrt", "scapy"], default="openwrt",
-        help="Chế độ thu thập: 'openwrt' (Poll trực tiếp từ driver OpenWrt cho AI HIL) "
-             "hoặc 'scapy' (Bắt gói Monitor Mode qua TP-Link Archer T2U Plus để khảo sát thực địa)."
+        help="Chế độ thu thập: 'openwrt' (Quét cả 2.4GHz & 5GHz trên mọi AP trong YAML) hoặc 'scapy' (Monitor Mode)"
     )
-    parser.add_argument("--zone", type=str, default="Unspecified", help="Tên khu vực (VD: ThuVien, PhongHoc_A101)")
+    parser.add_argument("--zone", type=str, default="KHKT_Testbed", help="Tên khu vực (VD: CangTin, PhongHoc_A101, KHKT_Testbed)")
     parser.add_argument("--iface", type=str, default="wlan0mon", help="Interface Monitor cho mode scapy")
-    parser.add_argument("--openwrt-iface", type=str, default="phy1-ap0", help="Interface Wi-Fi trên Router OpenWrt")
     parser.add_argument("--interval", type=int, default=3, help="Chu kỳ lấy mẫu (giây) cho mode openwrt")
     parser.add_argument("--scan-time", type=int, default=CHANNEL_SCAN_SECONDS, help="Thời gian quét kênh mode scapy")
 
@@ -442,7 +475,6 @@ if __name__ == "__main__":
         mode=args.mode,
         iface_mon=args.iface,
         zone=args.zone,
-        openwrt_iface=args.openwrt_iface,
         poll_interval=args.interval
     )
     node.start()
