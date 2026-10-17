@@ -1,0 +1,22 @@
+network_topology:
+  gateway_ip: 192.168.2.1
+  subnet_mask: 255.255.255.0
+  nodes:
+  - name: Router_Master
+    ip: 192.168.2.1
+    role: master
+    ssid_suffix: ''
+    bssid_5g: D4:53:2A:B2:92:DF
+    bssid_2g: D4:53:2A:B2:92:DE
+  - name: Router_AP1
+    ip: 192.168.2.2
+    role: ap
+    ssid_suffix: ' AP1'
+    bssid_5g: CC:D8:43:B6:13:07
+    bssid_2g: CC:D8:43:B6:13:06
+  ap_map:
+    D4:53:2A:B2:92:DF: 192.168.2.1
+    CC:D8:43:B6:13:07: 192.168.2.2
+  ap_map_2g:
+    D4:53:2A:B2:92:DE: 192.168.2.1
+    CC:D8:43:B6:13:06: 192.168.2.2

@@ -235,3 +235,8 @@ __pycache__/
 8821au-20210708/
 KHKT_2026_WIFI_RL/
 WSL2-Linux-Kernel/
+
+# OpenWrt VM firmware & data (file quá lớn cho GitHub, script sẽ tự tải)
+tests/openwrt_vm/vm_data/
+*.img
+*.img.gz
