@@ -106,7 +106,7 @@ def execute_ai_action_for_ap(target_ip, action_array):
 
     target_channel = CHANNELS[ch_idx]
     target_bw = BANDWIDTHS[bw_idx]
-    target_tx = 8 + tx_idx
+    target_tx = 14 + tx_idx
     target_beacon = BEACON_INTS[beacon_idx]
     target_beamform = True if beamform_idx == 1 else False
 
