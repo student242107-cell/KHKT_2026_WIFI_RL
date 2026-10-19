@@ -135,7 +135,12 @@ def main():
     print("=========================================================")
 
     try:
-        model = PPO.load(MODEL_PATH)
+        custom_objects = {
+            "learning_rate": 0.0,
+            "lr_schedule": lambda _: 0.0,
+            "clip_range": lambda _: 0.2,
+        }
+        model = PPO.load(MODEL_PATH, custom_objects=custom_objects)
         oracle_twin = UltimateDigitalTwinEnv()
     except Exception as e:
         logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")

@@ -31,7 +31,12 @@ def main():
     
     # LOAD MÔ HÌNH CŨ
     logging.info("Đang nạp 'bộ não' Colab vào Môi trường Thực tế...")
-    model = PPO.load(PRETRAINED_MODEL_PATH, env=env, device='cpu')
+    custom_objects = {
+        "learning_rate": 3e-4,
+        "lr_schedule": lambda _: 3e-4,
+        "clip_range": lambda _: 0.2,
+    }
+    model = PPO.load(PRETRAINED_MODEL_PATH, env=env, device='cpu', custom_objects=custom_objects)
 
     # FINE-TUNING (HỌC BỔ SUNG)
     logging.info("Bắt đầu học tăng cường trên môi trường thật (Sẽ mất thời gian do phải chờ mạng Wi-Fi thực...).")
