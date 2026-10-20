@@ -106,7 +106,7 @@ def execute_ai_action_for_ap(target_ip, action_array):
 
     target_channel = CHANNELS[ch_idx]
     target_bw = BANDWIDTHS[bw_idx]
-    target_tx = 8 + tx_idx
+    target_tx = 14 + tx_idx
     target_beacon = BEACON_INTS[beacon_idx]
     target_beamform = True if beamform_idx == 1 else False
 
@@ -135,7 +135,12 @@ def main():
     print("=========================================================")
 
     try:
-        model = PPO.load(MODEL_PATH)
+        custom_objects = {
+            "learning_rate": 0.0,
+            "lr_schedule": lambda _: 0.0,
+            "clip_range": lambda _: 0.2,
+        }
+        model = PPO.load(MODEL_PATH, custom_objects=custom_objects)
         oracle_twin = UltimateDigitalTwinEnv()
     except Exception as e:
         logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")
