@@ -196,17 +196,48 @@ def soft_reset_ap(ap_ip):
 
 
 def hard_reboot_ap(ap_ip, poe_port):
-    """CỨU HỘ CỨNG: Ngắt điện vật lý 220V (Sonoff) hoặc PoE khi Soft-Rescue bất lực."""
+    """
+    CỨU HỘ CỨNG: Ngắt điện vật lý 220V (Sonoff Smart Plug S26AI)
+    hoặc PoE Switch khi Soft-Rescue bất lực.
+
+    Sonoff S26AI kết nối qua Mobile Hotspot (out-of-band channel),
+    đảm bảo vẫn nhận lệnh ngay cả khi router chính bị treo.
+
+    Flow: TẮT nguồn → Chờ 5 giây → BẬT lại → Router power cycle.
+    """
     log_failsafe_event(ap_ip, level="HARD", reason="Hardware_Power_Cycle")
 
     if HARD_FAILSAFE_MODE == "SONOFF":
-        logging.info(f"[HARD-RESCUE] Kích hoạt Sonoff Plug cắt điện 220V cho AP {ap_ip}...")
+        logging.info(f"[HARD-RESCUE] Kích hoạt Sonoff Smart Plug S26AI cắt điện 220V cho AP {ap_ip}...")
         try:
-            payload = {"data": {"switch": "off", "pulse": "on", "pulseWidth": 5000}}
-            requests.post(f"http://{SONOFF_IP}/zeroconf/switch", json=payload, timeout=3)
-            return True
+            from src.modules.sonoff_controller import hard_reboot_router_via_sonoff
+            success = hard_reboot_router_via_sonoff(delay=5, use_pulse=False)
+            if success:
+                logging.info(f"✅ [HARD-RESCUE] Power Cycle qua Sonoff thành công cho AP {ap_ip}!")
+            else:
+                logging.critical(
+                    f"❌ [HARD-RESCUE] Power Cycle qua Sonoff THẤT BẠI cho AP {ap_ip}! "
+                    f"Kiểm tra: Mobile Hotspot, Sonoff IP, DIY Mode."
+                )
+            return success
+        except ImportError:
+            # Fallback: gọi API trực tiếp nếu module chưa có
+            logging.warning("[HARD-RESCUE] Fallback: Gọi Sonoff API trực tiếp (không qua controller)...")
+            try:
+                payload = {
+                    "deviceid": "",
+                    "data": {"switch": "off"}
+                }
+                requests.post(f"http://{SONOFF_IP}:8081/zeroconf/switch", json=payload, timeout=5)
+                time.sleep(5)
+                payload["data"]["switch"] = "on"
+                requests.post(f"http://{SONOFF_IP}:8081/zeroconf/switch", json=payload, timeout=5)
+                return True
+            except Exception as e:
+                logging.critical(f"[-] Lỗi Sonoff (fallback): {e}")
+                return False
         except Exception as e:
-            logging.critical(f"[-] Lỗi Sonoff: {e}")
+            logging.critical(f"[-] Lỗi Sonoff Controller: {e}")
             return False
 
     elif HARD_FAILSAFE_MODE == "POE_SWITCH" and ConnectHandler is not None:

@@ -5,11 +5,13 @@ import os
 import json
 import argparse
 import yaml
+from datetime import datetime
 from dotenv import load_dotenv
 from stable_baselines3 import PPO
 
 from src.modules import wifi_actuators as actuators
 from src.envs.digital_twin_env import UltimateDigitalTwinEnv
+from src.utils.logger import AILogger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -24,7 +26,6 @@ parser.add_argument('--band', type=str, choices=['2.4G', '5G'], default='5G', he
 parser.add_argument('--interval', type=int, default=10, help='Chu kỳ điều khiển AI (giây)')
 args = parser.parse_args()
 
-
 def load_ap_map(band):
     try:
         with open(CONFIG_PATH, 'r') as file:
@@ -37,7 +38,6 @@ def load_ap_map(band):
         logging.error(f"Lỗi đọc file cấu hình mạng {CONFIG_PATH}: {e}")
         return {}
 
-
 AP_MAP = load_ap_map(args.band)
 if not AP_MAP:
     logging.critical("Không có thông tin AP nào trong file YAML!")
@@ -45,7 +45,6 @@ if not AP_MAP:
 
 logging.info(f"Đã nạp bản đồ mạng ({args.band}): Tối ưu hóa cho {len(AP_MAP)} APs: {AP_MAP}")
 
-# Ánh xạ chuẩn xác cho phần cứng Xiaomi AX3000T (OpenWrt MediaTek Filogic 820)
 if args.band == '5G':
     TARGET_RADIO = "radio1"
     TARGET_IFACE = "phy1-ap0"
@@ -62,13 +61,12 @@ OBSS_PD_LEVELS = [-82, -77, -72, -67, -62]
 PROCESSED_DATA_PATH = "data/processed/per_ap_state.json"
 
 previous_actions = {}
-
+ai_logger = AILogger()
 
 def get_per_ap_states():
     if not os.path.exists(PROCESSED_DATA_PATH):
         logging.warning("Chưa có dữ liệu Telemetry. Trả về rỗng.")
         return {}
-
     try:
         with open(PROCESSED_DATA_PATH, 'r') as f:
             json_data = json.load(f)
@@ -86,36 +84,34 @@ def get_per_ap_states():
                     data["minute"],
                     data["is_break_time"]
                 ], dtype=np.float32)
-
                 state_array = np.clip(
                     state_array,
                     a_min=[-90.0, 0.0, 0.0, 0.0, 0, 0, 0, 0],
                     a_max=[-30.0, 1.0, 1.0, 1.0, 300, 23, 59, 1]
                 )
                 states[bssid.upper()] = state_array
-
         return states
-
     except Exception as e:
         logging.error(f"Lỗi đọc JSON State: {e}")
         return {}
 
 
-def execute_ai_action_for_ap(target_ip, action_array):
+def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected_reward):
     ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
 
     target_channel = CHANNELS[ch_idx]
     target_bw = BANDWIDTHS[bw_idx]
     target_tx = 14 + tx_idx
+    target_mcs = mcs_idx
     target_beacon = BEACON_INTS[beacon_idx]
     target_beamform = True if beamform_idx == 1 else False
 
     logging.info(
         f"👉 Kê đơn cho AP {target_ip} ({TARGET_RADIO}/{TARGET_IFACE}): "
-        f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, Beacon={target_beacon}ms"
+        f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS={target_mcs}, Beacon={target_beacon}ms"
     )
 
-    actuators.apply_ai_profile_atomic(
+    success = actuators.apply_ai_profile_atomic(
         ap_ip=target_ip,
         username=USER,
         password=PWD,
@@ -127,6 +123,12 @@ def execute_ai_action_for_ap(target_ip, action_array):
         beacon_int=target_beacon,
         enable_bf=target_beamform
     )
+    # Áp dụng thêm khóa giới hạn MCS nếu mạng nghẽn
+    actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
+
+    # Ghi log lịch sử hành động
+    status = "Executed" if success else "Failed"
+    ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
 
 
 def main():
@@ -140,7 +142,7 @@ def main():
             "lr_schedule": lambda _: 0.0,
             "clip_range": lambda _: 0.2,
         }
-        model = PPO.load(MODEL_PATH, custom_objects=custom_objects)
+        model = PPO.load(MODEL_PATH, custom_objects=custom_objects, device="cpu")
         oracle_twin = UltimateDigitalTwinEnv()
     except Exception as e:
         logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")
@@ -149,6 +151,7 @@ def main():
     while True:
         try:
             per_ap_states = get_per_ap_states()
+            occupied_channels = [] # Bộ điều phối đa trạm: lưu các kênh đã bị các AP chọn
 
             for bssid, state in per_ap_states.items():
                 target_ip = AP_MAP[bssid]
@@ -158,6 +161,16 @@ def main():
                 )
 
                 action, _ = model.predict(state, deterministic=True)
+                
+                # Multi-AP Channel Coordinator: Tránh việc AP sau chọn đè kênh AP trước
+                ch_idx = int(action[0])
+                if ch_idx in occupied_channels:
+                    # Nếu kênh bị chiếm, tự động đẩy sang kênh trực giao liền kề chưa bị chiếm
+                    available_chs = [i for i in range(len(CHANNELS)) if i not in occupied_channels]
+                    if available_chs:
+                        action[0] = available_chs[0]
+                        logging.info(f"   [Coordinator] Đã điều phối lại Kênh cho {target_ip} để tránh CCI nội bộ.")
+                occupied_channels.append(int(action[0]))
 
                 prev_action = previous_actions.get(bssid)
                 if prev_action is None or not np.array_equal(action, prev_action):
@@ -166,11 +179,13 @@ def main():
 
                     logging.info(f"   [Oracle] Điểm thưởng dự đoán tương lai: {expected_reward:.2f}")
 
-                    if expected_reward < 0.0:
+                    # Chỉ phủ quyết nếu expected_reward thực sự quá âm (< -1.0)
+                    if expected_reward < -1.0:
                         logging.warning("   [CẢNH BÁO] Oracle phủ quyết lệnh này! Giữ nguyên cấu hình cũ.")
+                        ai_logger.log_action(target_ip, bssid, state, action, expected_reward, "Vetoed")
                     else:
                         logging.info("   ✅ Lệnh an toàn. Đang thực thi xuống OpenWrt...")
-                        execute_ai_action_for_ap(target_ip, action)
+                        execute_ai_action_for_ap(target_ip, bssid, state, action, expected_reward)
                         previous_actions[bssid] = action.copy()
 
             time.sleep(args.interval)
