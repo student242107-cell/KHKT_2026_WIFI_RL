@@ -1,207 +1,457 @@
-# KHKT 2026: END-TO-END SMART WI-FI OPTIMIZATION SYSTEM (COGNITIVE WI-FI)
+# BÁO CÁO NGHIÊN CỨU TỔNG THỂ: HỆ THỐNG TỐI ƯU HÓA COGNITIVE WI-FI ĐẦU CUỐI (KHKT 2026)
 
-## 1. Executive System Overview & Quantitative Performance Evaluation ( $M \gg N$ )
+## 1. TỔNG QUAN HỆ THỐNG CẤP ĐIỀU HÀNH VÀ MÔ HÌNH TỐI ƯU HÓA \(M \gg N\)
 
-### Context & Strategic Importance
+### Bối cảnh và tầm quan trọng chiến lược
 
-In high-density enterprise wireless deployments—spanning university lecture halls, corporate headquarters, and stadium environments—legacy Wi-Fi management frameworks (N) exhibit structural failure modes driven by static operational paradigms. Conventional wireless local area networks (WLANs) rely on uncoordinated access point (AP) placements, manual radio frequency (RF) site surveys, and fixed physical (PHY) and Medium Access Control (MAC) parameters. These static configurations fail to adapt to dynamic multi-path attenuation, non-stationary RF interference, and fluctuating client traffic distributions, resulting in severe co-channel interference (CCI), bufferbloat, and connection dropping. To eliminate these systemic bottlenecks, this project establishes the architecture for an autonomous, end-to-end cognitive wireless framework (M). By unifying spatial-sensing pre-deployment topology optimization, heterogeneous hardware profiling, single-agent reinforcement learning at the edge, and real-time protocol-compliant MAC manipulation, the Cognitive Wi-Fi framework delivers continuous link stability, deterministic sub-15 ms latency, and maximal spatial spectrum utilization under ultra-dense user loads.
+Sự gia tăng theo cấp số nhân của lưu lượng di động và mật độ tập trung cao của các thiết bị đầu cuối đã bộc lộ những điểm yếu căn bản của các mô hình triển khai Wi-Fi tĩnh truyền thống (N). Trong môi trường vận hành mật độ cao — chẳng hạn trụ sở doanh nghiệp, hội trường đại học, trung tâm triển lãm và khu dân cư — việc gán kênh tĩnh, cố định mức công suất phát và sử dụng các cơ chế tranh chấp ở lớp MAC thiếu phối hợp dẫn đến nhiễu giữa các ô phủ sóng ở tần số vô tuyến (RF) nghiêm trọng, va chạm khung dữ liệu ở mức nghiêm trọng và sự gia tăng đột biến của độ trễ đuôi. Dự án Cognitive Wi-Fi dành cho KHKT 2026 thực hiện sự chuyển đổi mô hình căn bản từ hạ tầng tĩnh kiểu cũ (N) sang một hệ sinh thái nhận thức thích ứng theo thời gian thực, vận hành bằng AI (M). Không thể giải quyết môi trường không dây mật độ cao chỉ bằng tinh chỉnh sau triển khai hoặc bổ sung phần cứng tĩnh. Thay vào đó, môi trường này đòi hỏi một khuôn khổ đầu cuối hợp nhất kỹ thuật cấu trúc liên kết không gian trước triển khai với cơ chế điều khiển vòng kín trong thời gian chạy, theo thời gian thực, dựa trên Học tăng cường (RL). Bằng cách kết nối trực tiếp việc lập hồ sơ không gian vật lý với một bộ máy thực thi tự chủ, hệ thống nhận thức được đề xuất chuyển phổ vô tuyến chưa được quản lý thành môi trường truyền dẫn không dây có tính xác định và độ tin cậy cao.
 
-### System Transformation Equation
+### Triết lý cốt lõi: “Thượng Tôn Chất Lượng Người Dùng” (User Quality Supremacy)
 
-The operational supremacy of the proposed Cognitive Wi-Fi framework over legacy static management is formally specified through the composite system transformation utility inequality:
+Nền tảng kiến trúc của hệ thống nhận thức này được chi phối bởi nguyên tắc vận hành tuyệt đối “Thượng Tôn Chất Lượng Người Dùng” (User Quality Supremacy). Triết lý này yêu cầu các chỉ số Chất lượng dịch vụ (QoS) và Chất lượng trải nghiệm (QoE) trong thực tế phải là những ràng buộc vận hành cứng, không được phép thỏa hiệp. Cụ thể, hệ thống duy trì các giới hạn hiệu năng sau trong tất cả trạng thái vận hành đang hoạt động:
 
-$$U(M) \gg U(N)$$
+- Độ trễ (`Latency_99`): $\le 15\,\text{ms}$ (giới hạn độ trễ ở phân vị thứ 99).
+- Tỷ lệ lỗi gói tin (`PER`): $<1\%$.
+- Chỉ báo cường độ tín hiệu thu (`RSSI`): $\ge -65\,\text{dBm}$.
 
-Where the composite wireless utility function $U(X)$ for a given system architecture $X \in \{M, N\}$ is defined as:
+Trong mọi trường hợp, không được phép làm suy giảm các giới hạn trải nghiệm người dùng này để đáp ứng các mô hình toán học trừu tượng trên lý thuyết, tối đa hóa thông lượng tổng hợp hoặc thực hiện các biện pháp tắt nguồn tiết kiệm năng lượng quyết liệt theo hướng AI xanh (Green AI). Việc tiết kiệm năng lượng và tối ưu hiệu quả sử dụng phổ tần chỉ được thực hiện trong miền khả thi hợp lệ được xác định bởi những ràng buộc QoE không thể thỏa hiệp này.
 
-$$U(X) = \alpha \cdot \bar{\mathcal{T}}(X) - \beta \cdot \bar{\mathcal{L}}_{99}(X) - \gamma \cdot \text{CapEx}(X) - \delta \cdot \text{OpEx}(X)$$
+### Chứng minh toán học về ưu thế của hệ thống \((M >> N)\)
 
-Where:
+Để chứng minh bằng toán học rằng hệ sinh thái nhận thức (M) vượt trội rõ rệt so với các mô hình triển khai tĩnh truyền thống (N), chúng tôi xây dựng hai mô hình toán học bổ trợ cho nhau: **Chỉ số hiệu quả nhân** (`Index_VN`) và **Hàm tiện ích tuyến tính tổng hợp** (`U(X)`).
 
-* $\bar{\mathcal{T}}(X)$ represents the spatial normalized area throughput ($\text{Mbps/m}^2$) across all active Basic Service Sets (BSSs).
-* $\bar{\mathcal{L}}_{99}(X)$ denotes the 99th-percentile end-to-end packet transport latency ($\text{ms}$).
-* $\text{CapEx}(X)$ and $\text{OpEx}(X)$ represent normalized capital expenditure (hardware procurement, structural modification) and operational expenditure (site surveys, administrative maintenance, energy consumption), respectively.
-* $\alpha, \beta, \gamma, \delta \in \mathbb{R}^+$ are architecturally tuned weighting coefficients enforcing system optimization priorities.
-* **M** (Cognitive Wi-Fi Framework): Integrates LiDAR/optical spatial sensing, heterogeneous hardware allocation, single-agent Proximal Policy Optimization (PPO) embedded with Chaos Engineering resilience, and IEEE 802.11ax MAC/PHY runtime orchestration.
-* **N** (Legacy Static Framework): Represents conventional manual RF site planning, homogeneous access point deployment, fixed channel assignments, and uncoordinated carrier sense multiple access with collision avoidance (CSMA/CA).
+#### 1. Chỉ số hiệu quả nhân (`Index_VN`)
 
-The condition $U(M) \gg U(N)$ establishes that the cognitive system's combined utility—governed by throughput maximization, sub-15 ms latency guarantees, and structural expenditure compression—exceeds legacy static baselines by orders of magnitude.
+Chỉ số hiệu năng tổng thể của hệ thống được định nghĩa là tỷ số vô hướng giữa tiện ích vận hành và phần tài nguyên phần cứng, triển khai phát sinh thêm:
 
-### Quantitative Metrics Table
+$$
+\text{Index}_{VN}=\frac{\text{Throughput}\times\text{Reliability}}{\text{Latency}\times(\text{CapEx}\times\text{OpEx}_{\text{Setup}})}
+$$
 
-**Key Performance Indicator (KPI) Benchmarks: Legacy (N) vs. Cognitive Framework (M)**
+Trong đó:
 
-| Performance Metric & Indicator | Target Ratio & Benchmark Specification | Operational Baseline & Optimization Impact |
-|---|---|---|
-| Procurement & Installation Cost Savings Ratio | $\ge 20\%$ Reduction | Measured against homogeneous enterprise AP deployment baselines. Derived via spatial-sensing topology profiling and heterogeneous hardware allocation. |
-| Survey & Setup Acceleration Ratio | $30\% - 50\%$ Time Reduction | Measured from initial site inspection to live operational deployment. Achieved by replacing physical walk-through surveys with automated LiDAR 3D ray-tracing. |
-| User Quality Supremacy Ratio | $\ge 60\%$ Quality Increase | Measured by effective link utility: RSSI $\ge -65\ \text{dBm}$, continuous aggregate link throughput, 99th-percentile packet latency $< 15\ \text{ms}$, and zero frame drop events. |
+- `Throughput` đo thông lượng tải dữ liệu không gian tổng hợp được truyền trong khu vực triển khai ($\text{Mbps}/\text{m}^2$).
+- `Reliability` được định nghĩa là $(1-\text{PER})$, biểu thị tỷ lệ các đơn vị dữ liệu giao thức MAC (MPDU) được xác nhận thành công.
+- `Latency` đo độ trễ đầu cuối của khung, từ lúc được đưa vào hàng đợi MAC đến khi nhận được xác nhận ACK ở lớp vật lý.
+- `CapEx` biểu thị tổng chi phí tiền tệ dành cho các điểm truy cập phần cứng (AP) và hạ tầng vô tuyến.
+- `OpEx_Setup` biểu thị chi phí vận hành liên quan đến khảo sát hiện trường vật lý, nhân công lắp đặt và cấu hình RF thủ công.
 
-### KPI Analytical Evaluation ("So What?")
+Trong các hệ thống cũ (N), quy hoạch địa điểm tĩnh dựa vào kiểm tra thực địa bằng cách đi bộ và triển khai dư thừa đồng loạt phần cứng đắt tiền để bao phủ các đợt tăng mật độ trong trường hợp xấu nhất, khiến `CapEx` và `OpEx_Setup` bị đẩy lên cao. Đồng thời, nhiễu đồng kênh (CCI) không được quản lý trong các hệ thống cũ gây va chạm khung khi tải tăng, làm tăng `Latency` trung bình và giảm `Reliability`. Hệ thống M tối ưu phân hạng phần cứng thông qua quét không gian dựa trên LiDAR (giảm `OpEx_Setup`) và quản lý động việc cấp phát sóng mang con bằng Đa truy nhập phân chia theo tần số trực giao (OFDMA) theo thời gian thực (giảm `Latency` và tối đa hóa `Reliability`). Do đó, $\text{Index}_{VN}(M)\gg\text{Index}_{VN}(N)$.
 
-Deconstructing these quantitative metrics demonstrates how rigorous mathematical engineering directly dictates enterprise financial and operational performance:
+#### 2. Hàm tiện ích tuyến tính tổng hợp \(U(X)\) và động lực của mức phạt phi lồi
 
-1. **Procurement & Installation Cost Savings** ( $\ge 20\%$ CapEx Compression): Traditional enterprise deployment doctrines enforce homogeneous hardware procurement, saturating facilities with uniform, maximum-configuration APs to prevent theoretical coverage dead zones. This practice unnecessarily inflates Capital Expenditure. The Cognitive Framework profiles physical spatial zones using spatial sensing metrics, matching maximum-configuration multi-stream APs (e.g., 8×8 MU-MIMO) strictly to high-density traffic hubs, while deploying cost-optimized dual-band APs in transient zones. This strategic allocation compresses baseline hardware procurement expenditure by at least $20\%$ without degrading spatial capacity.
-2. **Survey & Setup Acceleration** ( $30\% - 50\%$ OpEx Acceleration): Legacy site surveys require extensive manual field testing with handheld spectrum analyzers, creating prolonged pre-operational delays and high labor costs. By capturing room geometry and material absorption profiles via LiDAR and optical sensing, the Cognitive Framework generates automated 3D Ray-Tracing Digital Twins. This transition condenses pre-deployment planning cycles from weeks to days, reducing site survey OpEx and accelerating time-to-service by up to $50\%$.
-3. **User Quality Supremacy** ( $\ge 60\%$ Utility & Quality Gain): Unmanaged co-channel interference and uncoordinated MAC contention induce high frame retry rates, packet delay jitter, and bufferbloat. Enforcing a $\ge 60\%$ utility increase alongside a strict $15\ \text{ms}$ latency ceiling transforms raw PHY capabilities into deterministic link quality. This guarantees uninterrupted performance for real-time traffic (e.g., VoIP, 4K video conferencing, industrial teleoperation), eliminating network downtime and productivity loss.
+Hàm tiện ích hệ thống $U(X)$ đánh giá sự cân bằng giữa thông lượng, độ trễ đuôi, chi phí vốn và chi phí vận hành trên các cấu hình hệ thống $X\in\{M,N\}$:
+
+$$
+U(X)=\alpha\cdot\text{Spatial\_Throughput}-\beta\cdot\text{Latency}_{99}-\gamma\cdot\text{CapEx}-\delta\cdot\text{OpEx}
+$$
+
+Trong đó, $\alpha,\beta,\gamma,\delta>0$ là các hệ số trọng số. Để thực thi triết lý cốt lõi “Thượng Tôn Chất Lượng Người Dùng”, vectơ trọng số được cấu hình sao cho trọng số phạt độ trễ lớn hơn hẳn trọng số thông lượng ($\beta\gg\alpha$).
+
+```text
+   Tiện ích U(X)
+        ^
+        |          Hệ thống M (Thực thi thích ứng nhận thức)
+   +U_M |..........===============================> Độ trễ được giới hạn <= 15 ms
+        |         /
+        |        /
+      0 +-------/------------------------------------> Mật độ / tải thiết bị đầu cuối
+        |      /
+        |     /     Hệ thống N (Hạ tầng tĩnh truyền thống)
+   -U_N |..../......-----------------------------\  Độ trễ đuôi tăng vọt
+        |   /                                     \ (Latency_99 > 15 ms)
+        v  /                                       v Sụp đổ tiện ích phi lồi
+```
+
+Trong các mô hình triển khai tĩnh cũ (N), khi mật độ thiết bị đầu cuối tăng lên, cơ chế tranh chấp Đa truy nhập cảm nhận sóng mang, tránh va chạm (CSMA/CA) suy giảm do thuật toán lùi thời gian theo cấp số nhân. Khi mật độ người dùng làm các hàng đợi gói tin đầy lên, độ trễ đuôi ở phân vị thứ 99 vượt ngưỡng $15\,\text{ms}$ ($\text{Latency}_{99}\gg15\,\text{ms}$). Vì $\beta\gg\alpha$, số hạng $-\beta\cdot\text{Latency}_{99}$ chi phối $U(N)$, khiến đường cong tiện ích của mô hình triển khai cũ giảm sâu xuống các giá trị âm trong điều kiện mật độ cao.
+
+Ngược lại, Hệ thống M sử dụng thuật toán học tăng cường Proximal Policy Optimization (PPO) để điều chỉnh băng thông kênh, mức công suất phát, thời điểm thức dậy mục tiêu (TWT) và tham số Truy nhập kênh phân tán nâng cao (EDCA) trước khi hàng đợi bị bão hòa. Bằng cách duy trì $\text{Latency}_{99}\le15\,\text{ms}$ trong mọi chế độ mật độ vận hành, Hệ thống M tránh được sự sụp đổ tiện ích phi lồi, qua đó thể hiện ưu thế toán học: $U(M)\gg U(N)$.
+
+### Các mục tiêu định lượng của hệ thống
+
+Khuôn khổ Cognitive Wi-Fi được thiết kế để đáp ứng ba chuẩn vận hành định lượng cốt lõi so với các hệ thống tĩnh truyền thống:
+
+| Chỉ số mục tiêu hệ thống | Chuẩn vận hành mục tiêu | Cơ chế tối ưu hóa kỹ thuật |
+|---|---:|---|
+| Giảm chi phí đầu tư (CapEx) | $\ge20\%$ | Phân hạng phần cứng không đồng nhất theo mật độ và ghép với hồ sơ không gian. |
+| Giảm chi phí vận hành thiết lập (`OpEx_Setup`) | 30–50% | Quét kiến trúc đa đặc trưng tự động bằng LiDAR và cảm biến quang học. |
+| Cải thiện tiện ích và chất lượng Wi-Fi tổng thể ($U(X)$) | $\ge60\%$ | Điều khiển tham số vô tuyến động bằng PPO theo vòng kín và tinh chỉnh lớp MAC. |
+
+Sau khi xác lập ưu thế toán học nền tảng và các mục tiêu vận hành của khuôn khổ nhận thức, báo cáo chuyển sang kỹ thuật cấu trúc liên kết vô tuyến trước triển khai cần thiết để đạt được những cải thiện này.
 
 ---
 
-*Having established the quantitative utility models and executive performance benchmarks of the Cognitive Wi-Fi framework, the report addresses the foundational architectural phase: physical infrastructure topology optimization.*
+## 2. BÀI TOÁN 1: TỐI ƯU HÓA CẤU TRÚC LIÊN KẾT HẠ TẦNG VÔ TUYẾN (QUY HOẠCH VÀ TRIỂN KHAI)
 
----
+### Bối cảnh và tầm quan trọng chiến lược
 
-## 2. Problem 1: Infrastructure Topology Optimization (Planning & Deployment)
+Việc loại bỏ vùng chết phủ sóng, giảm thiểu nhiễu giữa các ô và bảo đảm phân bổ vốn hiệu quả đòi hỏi độ chính xác cao trong thiết kế cấu trúc liên kết trước khi lắp đặt phần cứng vật lý. Lập hồ sơ không gian từ giai đoạn đầu, trước triển khai, tạo ra môi trường RF vật lý tối ưu, bảo đảm rằng lớp tối ưu hóa AI thời gian thực ở các giai đoạn sau hoạt động trong một cấu trúc liên kết hệ thống cân bằng tốt, thay vì phải cố bù đắp các sai sót căn bản trong thiết kế địa điểm vật lý.
 
-### Context & Strategic Importance
+### Bài toán 1.1: Thu thập nhanh đặc trưng hồ sơ bằng quét không gian
 
-The physical layout and radio frequency propagation characteristics of an indoor environment define the fundamental signal-to-interference-plus-noise ratio (SINR) ceiling of a wireless network. Dynamic runtime scheduling algorithms cannot resolve signal attenuation caused by access points placed behind structural concrete or severe co-channel interference caused by improper physical overlap. Pre-deployment topology optimization resolves these physical vulnerabilities prior to hardware installation, eliminating lifetime coverage dead zones, balancing inter-cell interference boundaries, and maximizing hardware capital efficiency.
+Để giảm chi phí khảo sát hiện trường (`OpEx_Setup`) từ 30% đến 50%, hệ thống thay các phép thử thực địa thủ công bằng phương pháp quét không gian tự động. Sử dụng cảm biến đo và định vị bằng ánh sáng (LiDAR) kết hợp camera độ sâu quang học, thiết bị quét thu thập ma trận đặc trưng kiến trúc 5 chiều từ các cơ sở mục tiêu:
 
-### 2.1: Fast Profiling Feature Capture via Spatial Sensing
+1. **Hình học thể tích và diện tích bề mặt (V, A):** trích xuất ranh giới thể tích 3D để tính kích thước phòng chính xác và hồ sơ lan truyền tín hiệu RF.
+2. **Kết cấu tường và độ dày kết cấu ($d_w$):** đo kích thước vách ngăn nhằm xác định tường chịu lực, lõi bê tông cốt thép và vách thạch cao.
+3. **Hệ số hấp thụ và suy hao vật liệu ($\alpha_{\text{mat}}$):** tính toán hệ số suy hao vật liệu (biểu diễn bằng $\text{dB/m}$) trên cả hai băng tần $2.4\,\text{GHz}$ và $5\,\text{GHz}$ đối với bê tông, kính trong, kính đã xử lý, gỗ và vách kim loại tấm.
+4. **Đường truyền nhìn thẳng (LOS) và không nhìn thẳng (NLOS):** lập bản đồ các vectơ phản xạ gương chủ yếu, cạnh nhiễu xạ và vùng khuất tương ứng với các vị trí lắp AP tiềm năng.
+5. **Luồng di chuyển của con người ($F_{\text{human}}$):** theo dõi các hành lang lưu thông, cửa ra vào, lối vào cầu thang và cách bố trí chỗ ngồi để xây dựng bản đồ phân bố mật độ người thay đổi theo thời gian.
 
-Pre-deployment spatial sensing integrates Light Detection and Ranging (LiDAR) sensors and high-resolution optical camera systems to capture physical and RF attenuation characteristics prior to cable installation. The edge kernel captures a minimal metric taxonomy required for deterministic 3D RF ray-tracing:
+### Lập hồ sơ phần cứng không đồng nhất và phân hạng theo mật độ
 
-* **Wall Construction & Thickness** ( $d_w$ ): Measured in centimeters ($\text{cm}$) with a target measurement tolerance of $\pm 0.5\ \text{cm}$; determines structural barrier dimensions along physical RF propagation vectors.
-* **Material RF Absorption & Attenuation Coefficients** ( $\alpha_m$ ): Measured in decibels per meter ($\text{dB/m}$) or absolute loss per partition ($\text{dB}$); categorizes material compositions (reinforced concrete, drywall, double-pane glass, heavy masonry) across 2.4 GHz and 5 GHz spectrum bands.
-* **Room Spatial Volume** ( $V_r$ ) **& Surface Area** ( $A_r$ ): Measured in cubic meters ($m^3$) and square meters ($m^2$) bounded within a $\pm 1\%$ volumetric tolerance; defines three-dimensional spatial bounds, boundary reflection matrices, and client capacity limits.
-* **Line-of-Sight (LOS) vs. Non-Line-of-Sight (NLOS) Trajectories**: Represented as spatial probability fields $\text{LOS} \in \{0, 1\}$; maps structural obstructions between candidate AP mounting vectors and high-density client zones.
+Triển khai đồng loạt các AP có chi phí cao và cấu hình cao trên toàn bộ doanh nghiệp gây ra chi phí vốn không cần thiết. Kiến trúc nhận thức áp dụng chiến lược triển khai không đồng nhất, ánh xạ các không gian vật lý vào ba phân hạng phần cứng dựa trên mật độ trạm (STA) và yêu cầu lưu lượng:
 
-### 2.2: Heterogeneous Hardware Profiling & Cost-Optimized Allocation
-
-Rather than deploying identical, enterprise-grade access points across an entire facility, the framework profiles physical spaces into operational density zones and maps them to a heterogeneous hardware matrix. Premium APs featuring dense spatial streams, multi-user MIMO (MU-MIMO), and Orthogonal Frequency Division Multiple Access (OFDMA) resource unit (RU) capabilities are assigned strictly to high-density hubs. Mid-tier and low-tier hardware units are systematically deployed in transient or low-density spatial zones.
-
-**Heterogeneous Router Deployment & Resource Allocation Matrix**
-
-| Zone Type | Expected Client Density | Hardware Tier Specification | RF Configuration & Execution Strategy |
+| Phân hạng phần cứng | Môi trường vật lý mục tiêu và mật độ STA | Đặc tả PHY/MAC IEEE 802.11ax | Độ chi tiết RU và tham số vận hành RF |
 |---|---|---|---|
-| **High-Density Hub** (e.g., Lecture Hall Zone A, Canteen, Auditorium) | Ultra-High (100 – 200+ active STAs per AP) | Tier-1 Premium Hardware (Max-Config 8×8 / 4×4 MU-MIMO, high CPU/RAM, dedicated sensing radio) | Enforce fine-grained OFDMA subcarrier allocation ($78.125\ \text{kHz}$ spacing), 1024-QAM modulation, maximum Tx power, and small cell radii to maximize frequency reuse. |
-| **Medium-Density Workspace** (e.g., Open Plan Office, Conference Room) | Moderate (30 – 100 active STAs per AP) | Tier-2 Mid-Range Hardware (Standard 2×2 / 4×4 MU-MIMO, dual-band concurrent) | Enforce dynamic channel bonding ($20/40/80\ \text{MHz}$), adaptive Tx power control, and explicit beamforming to maintain uniform coverage. |
-| **Transient Low-Density** (e.g., Corridors, Stairwells, Storage) | Low / Transient (< 30 active STAs per AP) | Tier-3 Standard Hardware (Basic Dual-Band 2×2 MIMO) | Static $20\ \text{MHz}$ channelization, reduced Tx power levels to prevent cell leakage into adjacent high-density zones, and legacy rate pruning. |
+| **Tier 1 (mật độ cực cao)** | Khu A, căng-tin, hội trường, sân vận động (100–200+ STA/AP) | AP cấu hình cao; MU-MIMO 4×4 hoặc 8×8; băng thông 80/160 MHz; 1024-QAM; khoảng cách sóng mang con 78.125 kHz | Chia động thành RU 26, 52, 106 và 242 tone; bật BSS Coloring; phân bổ CPU/RAM cao. |
+| **Tier 2 (mật độ trung bình)** | Văn phòng doanh nghiệp, phòng hội nghị (30–100 STA/AP) | AP tầm trung; MU-MIMO 2×2 hoặc 4×4; băng thông 20/40/80 MHz; 1024-QAM | Tạo chùm tia (beamforming); phân bổ RU 52 và 106 tone động; tham số hàng đợi EDCA thích ứng. |
+| **Tier 3 (mật độ thấp / chuyển tiếp)** | Hành lang, cầu thang, kho lưu trữ (dưới 30 STA/AP) | AP chi phí thấp; MIMO 2×2; băng thông kênh cố định 20 MHz; 256-QAM | Chủ động giới hạn công suất phát ở 10 dBm để loại bỏ hiện tượng tràn RF sang các ô Tier 1/2; sử dụng một RU 242 tone. |
 
-### 2.3: Simulation Credibility: 3D Ray-Tracing vs. Manual Field Surveys
+### Cơ chế kỹ thuật của sóng mang con và đơn vị tài nguyên (RU) trong AP Tier 1
 
-To validate candidate AP topologies, the framework processes captured spatial metrics through an automated 3D Ray-Tracing Simulation Model. 3D ray-tracing simulates RF propagation vectors, explicitly calculating direct path loss, specular reflections, wall transmissions, diffractions, and material absorptions across complex geometries.
+Trong các môi trường triển khai Tier 1 có mật độ cực cao, khoảng cách sóng mang con truyền thống của IEEE 802.11a/g/n/ac (312.5 kHz với 64 sóng mang con trên mỗi 20 MHz) gây kém hiệu quả về thời gian phát khi truyền các tải dữ liệu nhỏ của người dùng (ví dụ: VoIP, tin nhắn tức thời, telemetry) do chi phí MAC cố định. AP Tier 1 triển khai cấu trúc sóng mang con IEEE 802.11ax, chia kênh 20 MHz thành 256 sóng mang con (mật độ sóng mang con tăng gấp 4 lần). Nhờ đó đạt khoảng cách sóng mang con chi tiết 78.125 kHz ($20{,}000\,\text{kHz}/256$).
 
-Compared to manual field surveys—which provide static, point-in-time Received Signal Strength Indicator (RSSI) measurements along limited physical paths—3D simulation provides mathematical generalizability. Digital Twin environments allow stress-testing under thousands of edge-case scenarios (e.g., sudden burst traffic arrivals, severe adjacent-channel interference, or single-node hardware failures) without disrupting live enterprise traffic or incurring manual labor costs.
+```text
+Kênh 20 MHz (tổng cộng 256 sóng mang con, khoảng cách 78.125 kHz)
++----+----+----+----+----+----+----+----+----+-------------------+
+|RU1 |RU2 |RU3 |RU4 |RU5 |RU6 |RU7 |RU8 |RU9 | Các RU 26 tone    |
+|26T |26T |26T |26T |26T |26T |26T |26T |26T | (9 STA song song) |
++----+----+----+----+----+----+----+----+----+-------------------+
+|     RU 52 tone 1 | RU 52 tone 2 | RU 52 tone 3 | RU 52 tone 4    |
++------------------+--------------+--------------+------------------+
+|            RU 106 tone 1        |         RU 106 tone 2         |
++---------------------------------+--------------------------------+
+|                    RU 242 tone 1 (một SU)                        |
++------------------------------------------------------------------+
+```
+
+Theo đặc tả lớp vật lý IEEE 802.11ax, một kênh 20 MHz chứa 242 sóng mang con được lấp đầy, có thể được phân chia động thành các Đơn vị tài nguyên (RU) nhỏ hơn:
+
+- **RU 26 tone:** gồm 24 sóng mang con dữ liệu và 2 sóng mang con pilot (độ rộng khoảng 2 MHz). Hỗ trợ tối đa 9 người dùng song song trên 20 MHz.
+- **RU 52 tone:** gồm 48 sóng mang con dữ liệu và 4 sóng mang con pilot (độ rộng khoảng 4 MHz). Hỗ trợ tối đa 4 người dùng song song trên 20 MHz.
+- **RU 106 tone:** gồm 102 sóng mang con dữ liệu và 4 sóng mang con pilot (độ rộng khoảng 8 MHz). Hỗ trợ tối đa 2 người dùng song song trên 20 MHz.
+- **RU 242 tone:** chiếm toàn bộ phổ 20 MHz cho các đợt truyền thông lượng cao của một người dùng đơn (SU).
+
+AP Tier 1 chia động các kênh 20 MHz hoặc 80 MHz thành những RU 26 tone trong các tình huống mật độ cao. Cấu trúc sóng mang con này kéo dài thời lượng ký hiệu OFDM tiêu chuẩn từ $3.2\,\mu\text{s}$ lên $12.8\,\mu\text{s}$. Khi kết hợp với các khoảng bảo vệ (GI) có thể chọn ($0.8\,\mu\text{s}$, $1.6\,\mu\text{s}$, $3.2\,\mu\text{s}$), hiệu suất sử dụng phổ ở lớp vật lý tăng từ 80% ($3.2/(3.2+0.8)$) trong hệ thống cũ lên 94% ($12.8/(12.8+0.8)$) tại các nút Tier 1 dùng 802.11ax.
+
+### Xác thực bằng mô phỏng bản sao số truy vết tia 3D
+
+Để xác thực vị trí AP và thiết lập công suất trước khi lắp đặt thực tế, ma trận đặc trưng không gian 5D đã thu thập được xử lý bởi bộ máy Bản sao số truy vết tia 3D. Bộ máy truy vết tia tính toán các vectơ truyền lan đa đường, đánh giá phản xạ gương, nhiễu xạ cạnh dao và suy hao truyền qua vật liệu trên bố cục không gian mục tiêu.
+
+Ngoài việc xác thực vùng phủ, Bản sao số truy vết tia 3D xuất ra các ma trận suy hao không gian vật lý $H_{\text{spatial}}(f)$ và các hàm truyền suy hao đường truyền. Các ma trận không gian tính toán này được xuất trực tiếp để khởi tạo không gian quan sát trạng thái ban đầu và các hàm truyền kênh của môi trường Gymnasium PPO động được mô tả ở Phần 3. Sự tích hợp này kết nối việc lập hồ sơ không gian vật lý trước triển khai với học tăng cường trong thời gian chạy, loại bỏ độ trễ hội tụ do khởi động lạnh khi kích hoạt hệ thống trong thực tế.
+
+Sau khi thiết lập cấu trúc liên kết vật lý được tối ưu và khởi tạo môi trường mô phỏng, báo cáo chuyển sang lớp vận hành động trong thời gian chạy.
 
 ---
 
-*While spatial sensing and 3D ray-tracing establish an optimized physical baseline, dynamic operational environments require continuous runtime adaptation. The report next details the dynamic real-time operational engine designed to manage runtime wireless state.*
+## 3. BÀI TOÁN 2: TỐI ƯU HÓA VẬN HÀNH ĐỘNG THEO THỜI GIAN THỰC
+
+### Bối cảnh và tầm quan trọng chiến lược
+
+Kỹ thuật vật lý trước triển khai tạo nền tảng RF tối ưu; tuy nhiên, môi trường vận hành thực tế có nhiều biến động động. Sự gia tăng đột ngột và tạm thời của thiết bị đầu cuối, vật cản vật lý di chuyển, lưu lượng ứng dụng bùng phát và nhiễu đồng kênh không được quản lý đòi hỏi hệ thống phải liên tục thích ứng trong thời gian chạy. Tối ưu hóa vận hành động theo thời gian thực triển khai điều khiển phản hồi vòng kín bằng học tăng cường để duy trì các giới hạn QoE khi điều kiện mạng thay đổi.
+
+### Kiến trúc bệ thử phần cứng và Sim-to-Real
+
+Khuôn khổ vận hành nhận thức được xác thực trên một bệ thử phần cứng được thiết kế cho điện toán biên:
+
+```text
++-----------------------------------------------------------------------------------+
+|                              MÁY CHỦ BIÊN (EDGE SERVER)                            |
+|                                                                                   |
+|   +---------------------------------+     +-----------------------------------+   |
+|   | Giao diện bảng điều khiển       |     | Tác tử PPO (môi trường Gymnasium) |   |
+|   | Streamlit                       |     |                                   |   |
+|   +---------------------------------+     +-----------------------------------+   |
+|                    ^                                 ^         |                  |
++--------------------|---------------------------------|---------|------------------+
+                     | Telemetry                      | Telemetry | Hành động
+                     | (JSON)                         | (gRPC)    | (JSON-RPC)
+                     v                                |           v
++----------------------------------------+    +-------------------------------------+
+| THIẾT BỊ BẮT GÓI WI-FI USB             |    | BỘ ĐỊNH TUYẾN XIAOMI AX3000T OPENWRT|
+| (Realtek RTL8812AU - Monitor Mode)     |    | (MediaTek MT7981B Filogic 820)      |
+| - Bắt Dot11Beacon / ProbeReq           |    | - Thu thập chỉ số MAC (p_c, Retry)  |
+| - Kiểm tra tiền tố PHY (RL-SIG)        |    | - Thực thi TxPower, Channel, TWT    |
++----------------------------------------+    +-------------------------------------+
+                                                                 | Đặt lại nguồn cứng
+                                                                 v
+                                               +-------------------------------------+
+                                               | Ổ CẮM THÔNG MINH SONOFF S26 R2      |
+                                               | (Watchdog qua REST API tự xây dựng) |
+                                               +-------------------------------------+
+```
+
+- **Phần cứng truy cập cấp doanh nghiệp:** bộ định tuyến Xiaomi AX3000T sử dụng bộ xử lý ARM Cortex-A53 hai lõi MediaTek MT7981B Filogic 820 (1.3 GHz), chạy firmware Linux OpenWrt tùy chỉnh.
+- **Thiết bị bắt telemetry chuyên dụng:** bộ điều hợp Wi-Fi USB ngoài (Realtek RTL8812AU hoạt động ở chế độ giám sát RF — Monitor Mode) được bố trí để bắt các khung quản lý chiếm dụng thời gian phát thô.
+- **Nút tính toán biên trung tâm:** máy chủ xử lý biên cục bộ chạy bộ máy chính sách RL và tổng hợp telemetry tốc độ cao.
+- **Giao thức truyền thông liên hệ thống hai kênh:**
+  - **Kênh telemetry đường lên:** socket gRPC Streaming thông lượng cao, truyền theo thời gian thực tỷ lệ va chạm MAC, tiêu đề khung PHY và chỉ số nhiễu từ các daemon OpenWrt đến máy chủ biên với chi phí phụ trội dưới một mili giây.
+  - **Kênh điều khiển đường xuống:** JSON-RPC độ trễ thấp qua WebSockets, gửi các lệnh tối ưu hóa (chuyển kênh, điều chỉnh công suất phát, thay đổi tham số EDCA) xuống các daemon bộ định tuyến riêng lẻ.
+
+### Lõi học tăng cường và bản sao số Chaos Engineering
+
+Trí tuệ trung tâm của bộ điều khiển động dựa trên thuật toán PPO đơn tác tử (Single-Agent Proximal Policy Optimization), hoạt động trong môi trường Bản sao số Gymnasium tùy chỉnh. Môi trường quan sát được khởi tạo bằng các ma trận suy hao không gian xuất từ Bản sao số truy vết tia 3D (Phần 2).
+
+Để bảo đảm tính vững chắc của chính sách trước khi triển khai phần cứng thực tế, bản sao số tích hợp các nguyên tắc Chaos Engineering cùng các bộ dữ liệu chuỗi thời gian về hiệu năng Wi-Fi thực tế. Trong quá trình huấn luyện ngoại tuyến, mô phỏng đưa vào các sự kiện gây căng thẳng môi trường nghiêm trọng:
+
+- Chèn nhiễu xung tức thời $+20\,\text{dB}$ để mô phỏng nhiễu từ lò vi sóng bên ngoài hoặc các nguồn không phải Wi-Fi.
+- Chuỗi rơi gói ngẫu nhiên theo đợt ở mức 15–50% để mô phỏng kênh suy hao đột ngột.
+- Các đỉnh độ trễ đột ngột vượt quá 300 ms để mô phỏng tắc nghẽn hàng đợi nghiêm trọng.
+- Đưa vào các AP giả mạo không được quản lý, hoạt động với chu kỳ công tác cao trên các tần số kênh chính.
+
+Huấn luyện dưới các nhiễu loạn môi trường hỗn loạn giúp ngăn chính sách khớp quá mức, bảo đảm hành vi điều khiển ổn định khi triển khai trên phần cứng biên thực tế.
+
+### Cơ chế cảm biến kép (không cần CSI, 0% tự gây nhiễu, không có lỗi OOM)
+
+Các phương pháp quản lý phổ tần động truyền thống thường dựa vào việc trích xuất ma trận Thông tin trạng thái kênh (CSI) thô. Tuy nhiên, thu thập và xử lý các ma trận CSI thô nhiều chiều đòi hỏi cấp phát bộ nhớ lớn, có thể dẫn đến lỗi kernel panic do hết bộ nhớ (OOM) trên bộ định tuyến nhúng (giới hạn RAM 256–512 MB). Ngoài ra, các khung dò CSI tường minh tạo thêm chi phí tự gây nhiễu trong thời gian phát sóng.
+
+Để khắc phục các giới hạn này, hệ thống triển khai **Cơ chế cảm biến kép không cần CSI, có trọng lượng xử lý thấp**:
+
+```text
+                     LUỒNG THỜI GIAN PHÁT RF THÔ
+                                      |
+                  +-------------------+-------------------+
+                  |                                       |
+                  v                                       v
+       [LỚP 1: CẢM BIẾN MAC]                    [LỚP 2: TIỀN TỐ PHY]
+       - Xác suất va chạm (p_c)                 - Kiểm tra RL-SIG (4 us)
+       - Tỷ lệ truyền lại (RTS/CTS & ACK)         sau L-SIG (4 us)
+       - Bắt khung bằng Scapy                   - Phép quay BPSK: chòm sao 90 độ
+         (Dot11Beacon / ProbeReq)               - Phân biệt HE SU / HE MU / HE TB
+                                                  - Phân tích L_Rate -> giải mã HE-SIG-B
+                  |                                       |
+                  +-------------------+-------------------+
+                                      |
+                                      v
+                      TELEMETRY TỔNG HỢP NHẸ
+                  (0% tự gây nhiễu, không có nguy cơ OOM)
+```
+
+#### 1. Cảm biến lớp MAC
+
+Sử dụng các daemon phân tách khung nhẹ (tệp thực thi bọc Scapy) chạy trên các nút bắt gói RTL8812AU chuyên dụng. Các daemon suy ra chỉ số tranh chấp lớp MAC bằng cách theo dõi:
+
+- Xác suất va chạm khung ở lớp MAC ($p_c$), tính từ tỷ lệ khung unicast không được xác nhận.
+- Tỷ lệ truyền lại khung (`Retry_Rate`), suy ra bằng cách kiểm tra bit retry trong tiêu đề MAC.
+- Theo dõi mật độ trạm đang hoạt động thông qua trích xuất khung quản lý Dot11Beacon và ProbeReq.
+
+#### 2. Cảm biến tiền tố PHY (theo nguyên lý Bằng sáng chế Hoa Kỳ 10,637,706 B2)
+
+Để thu thập trạng thái kênh ở lớp vật lý mà không cần ma trận CSI thô, thiết bị bắt gói kiểm tra cấu trúc tiền tố vật lý của các PPDU IEEE 802.11ax. Cụ thể, thiết bị kiểm tra trường Repeated Legacy Signal (RL-SIG) có thời lượng $4\,\mu\text{s}$, nằm liền kề ngay sau trường Legacy Signal (L-SIG) tiêu chuẩn có thời lượng $4\,\mu\text{s}$.
+
+**Kiến trúc tiền tố PPDU IEEE 802.11ax:**
+
+```text
++---------+---------+---------+---------+------------+---------+---------+
+|  L-STF  |  L-LTF  |  L-SIG  | RL-SIG  | HE-SIG-A   | HE-STF  | HE-LTF  |
+|  8 us   |  8 us   |  4 us   |  4 us   | 8 hoặc 16us|  4 us   | 4-16 us |
++---------+---------+---------+---------+------------+---------+---------+
+                                   ^
+                                   | Phân tích phép quay chòm sao BPSK
+                                   +-> Nhận diện tức thời định dạng HE
+```
+
+Trong 802.11ax, trường RL-SIG truyền một bản sao chính xác từng bit của trường L-SIG, nhưng áp dụng ánh xạ chòm sao khóa dịch pha nhị phân (BPSK) đã quay pha $90^\circ$ trên các sóng mang con. Bằng cách kiểm tra phép quay chòm sao bằng xử lý tín hiệu số (DSP) theo thời gian thực trên ký hiệu RL-SIG dài $4\,\mu\text{s}$, thiết bị bắt gói phân biệt các PPDU Hiệu suất cao (HE) với khung HT/VHT đời cũ mà không cần xử lý tải dữ liệu.
+
+Ngoài ra, phân tích trường tốc độ legacy (`L_Rate`) cho phép phần cứng giải mã cấu trúc High Efficiency Signal-B (HE-SIG-B) trong các PPDU HE MU. Quá trình này trích xuất sơ đồ điều chế và mã hóa (MCS), phân bổ luồng không gian và bản đồ gán RU trực tiếp từ tiêu đề PHY. Bằng cách chỉ phân tích tiêu đề tiền tố, cơ chế cảm biến kép tạo ra mức tự gây nhiễu 0% và sử dụng dưới 2 MB bộ nhớ, loại bỏ lỗi kernel OOM trên bộ định tuyến.
+
+### Kiến trúc an toàn kép (Dual Fail-Safe)
+
+Để bảo đảm độ sẵn sàng vận hành cao (thời gian hoạt động 99.99%), kiến trúc tích hợp cấu trúc phục hồi an toàn nhiều tầng:
+
+1. **Daemon Soft Watchdog (`cognitive-agent`):** daemon nền nhẹ chạy trên Linux OpenWrt, theo dõi các vòng socket gRPC/JSON-RPC đang hoạt động. Nếu tiến trình điều khiển gặp lỗi hoặc mất kết nối với máy chủ biên trong hơn 30 giây, watchdog khởi động lại ngăn xếp định tuyến và khôi phục các hồ sơ vận hành dự phòng tĩnh.
+2. **Đặt lại nguồn cứng bằng ổ cắm thông minh:** nếu AP gặp lỗi kernel hoặc treo phần cứng không phản hồi tín hiệu phần mềm, watchdog biên bên ngoài kích hoạt đặt lại nguồn vật lý bằng ổ cắm thông minh Sonoff S26 R2 thông qua REST API cục bộ.
+3. **Khôi phục bootloader tự động (UART/TFTP):** nếu bộ nhớ flash bị hỏng trong quá trình cập nhật cấu hình khi hệ thống đang chạy, các tập lệnh khôi phục tự động gửi lệnh bootloader qua cổng nối tiếp UART, khôi phục ảnh firmware sạch qua TFTP mà không cần can thiệp vật lý thủ công.
+
+### AI xanh so với nguyên tắc Thượng Tôn Chất Lượng Người Dùng
+
+Mặc dù giảm thiểu năng lượng là tham số vận hành quan trọng, mục tiêu này vẫn hoàn toàn đứng sau nguyên tắc Thượng Tôn Chất Lượng Người Dùng. Cấm tắt hoàn toàn nguồn của AP trong giờ vận hành; tắt radio sẽ tạo ra lỗ hổng vùng phủ sóng, làm giảm chất lượng liên kết và gây ra các đợt thiết bị đầu cuối kết nối lại ồ ạt.
+
+Thay vào đó, việc giảm công suất phát (`Tx Power`) chỉ được giới hạn trong giờ nghỉ, khi vectơ thời gian theo thời gian thực xác nhận tỷ lệ sử dụng phòng là 0%. Trong các khoảng thời gian này, AP quản lý lịch ngủ của thiết bị bằng Target Wake Time (TWT) theo IEEE 802.11ax và điều chỉnh tham số EDCA. TWT cấp lịch thức dậy rời rạc cho các thiết bị IoT và thiết bị đầu cuối đã kết nối, cho phép radio của chúng duy trì trạng thái ngủ cho đến khi đến các cửa sổ truyền dẫn được chỉ định.
+
+### Bảng điều khiển có con người tham gia vòng lặp (HITL)
+
+Giao diện Bảng điều khiển Streamlit theo thời gian thực cung cấp cho quản trị viên khả năng quan sát mạng và ghi đè điều khiển thủ công:
+
+- Hiển thị trực tiếp mức sử dụng kênh theo không gian, phân bố PER và các chỉ số độ trễ ở phân vị thứ 99.
+- Trực quan hóa các điều chỉnh tham số của tác tử PPO trên các ô phủ sóng được quản lý.
+- Cung cấp điều khiển ghi đè thủ công để quản trị viên khóa tham số kênh cụ thể, đóng băng không gian hành động của tác tử hoặc kích hoạt ngay chế độ dự phòng tĩnh trên toàn địa điểm trong các sự kiện bảo trì.
+
+### Kiến trúc triển khai thực tế
+
+Hệ thống hỗ trợ ba mô hình triển khai phần cứng nhằm đáp ứng quy mô doanh nghiệp và giới hạn ngân sách khác nhau:
+
+| Phương án triển khai | Kiến trúc thực thi tại biên | Môi trường mục tiêu | Chi phí phần cứng phát sinh | Khả năng mở rộng và chịu lỗi |
+|---|---|---|---|---|
+| **Phương án 1: Bộ điều khiển chính trên bộ định tuyến** | Tệp nhị phân PPO C++/ONNX Runtime (dấu chân bộ nhớ dưới 2 MB) được nhúng trực tiếp vào RAM bộ định tuyến | Văn phòng chi nhánh nhỏ, cửa hàng bán lẻ (1–5 AP) | 0 USD (chạy trên phần cứng bộ định tuyến sẵn có) | Tự chủ hoàn toàn tại chỗ; thực thi nhẹ với số lượng ô nhỏ. |
+| **Phương án 2: Mini PC / Raspberry Pi biên** | Cổng biên cục bộ chạy Gymnasium Python và môi trường thực thi tác tử PPO | Trường học, văn phòng doanh nghiệp cỡ vừa (10–50 AP) | 50–100 USD cho mỗi cổng tại địa điểm | Phối hợp nhiều ô cục bộ hiệu quả; vòng điều khiển dưới một mili giây. |
+| **Phương án 3: Quản lý qua đám mây, có dự phòng cục bộ** | Điều phối tập trung trên đám mây, kết hợp các tác tử dự phòng cục bộ tự chủ trên phần cứng biên | Khuôn viên doanh nghiệp nhiều tòa nhà (trên 50 AP) | Phí đăng ký dịch vụ đám mây | Tối ưu hóa chính sách toàn cục trên hàng nghìn ô; dự phòng tại chỗ bảo đảm hoạt động khi WAN mất kết nối. |
+
+Sau khi mô tả kiến trúc vận hành và cơ chế cảm biến động, báo cáo chuyển sang hình thức hóa toán học quá trình ra quyết định và các chiến thuật thực thi ở lớp MAC.
 
 ---
 
-## 3. Problem 2: Dynamic Real-Time Operational Optimization
+## 4. TỔNG HỢP MÔ HÌNH MDP VÀ CÁC CHIẾN THUẬT VẬN HÀNH LỚP MAC
 
-### Context & Strategic Importance
+### Bối cảnh và tầm quan trọng chiến lược
 
-Following physical deployment, enterprise networks experience dynamic operational fluctuations: rapid user mobility, shifting traffic demands (such as bursty video conferencing versus background IoT polling), non-Wi-Fi RF interference, and co-channel overlap. Static configurations fail to accommodate these variations. Dynamic real-time orchestration across the PHY and MAC layers is required to maintain service availability, prevent packet delay spikes, and enforce quality-of-service guarantees.
+Để đưa các vòng điều khiển động vào vận hành, những mục tiêu hiệu năng QoE trừu tượng phải được chuyển đổi bằng toán học thành không gian trạng thái-hành động của học tăng cường và thực thi thông qua cơ chế lớp MAC mức thấp của IEEE 802.11ax. Phần này trình bày hình thức hóa Quá trình quyết định Markov (MDP), phân tích hội tụ gradient của hàm thưởng và phác thảo các chiến thuật vận hành MAC tương ứng.
 
-### 3.1: Physical Testbed Architecture & Sim-to-Real Pipeline
+### Hình thức hóa quá trình quyết định Markov (MDP)
 
-To bridge the gap between simulated models and physical hardware execution (Sim-to-Real), the system utilizes a hardware testbed architecture. The edge node deployment consists of Xiaomi AX3000T access points driven by a custom OpenWrt Linux kernel (incorporating the MediaTek MT7981B SoC, dual-core ARM Cortex-A53 CPU @ 1.3 GHz, hardware Network Address Translation (NAT) packet offloading engines, and full integration with the mac80211 wireless driver stack).
+Bộ máy điều khiển mô hình hóa việc quản lý mạng động thành một Quá trình quyết định Markov rời rạc theo thời gian, được xác định bởi bộ $ (\mathcal{S},\mathcal{A},\mathcal{P},\mathcal{R},\gamma) $.
 
-These edge access points interface with a centralized Edge Server tasked with global state aggregation, heavy reinforcement learning inference, and system-wide orchestration.
-
-```
-       +-------------------------------------------------------+
-       |                 Centralized Edge Server               |
-       |  - Global State Aggregation   - PPO Reinforcement     |
-       |  - High-Level Inference       - Streamlit HITL Board  |
-       +---------------------------+---------------------------+
-                                   |
-                +------------------+------------------+
-                | Uplink Telemetry                    | Downlink Actions
-                | (gRPC Streaming over TCP)           | (JSON-RPC over WebSockets)
-                v                                     v
-       +-----------------------+             +-----------------------+
-       |   Xiaomi AX3000T AP   |             |   Xiaomi AX3000T AP   |
-       | (MediaTek MT7981B /   |             | (MediaTek MT7981B /   |
-       | OpenWrt mac80211 Edge)|             | OpenWrt mac80211 Edge)|
-       +-----------------------+             +-----------------------+
+```text
++---------------------------------------------------------------------------------+
+|                                  MÔI TRƯỜNG                                     |
+|                                                                                 |
+|  Quan sát trạng thái S_t thuộc Box(7)                                           |
+|  [Norm_RSSI, Noise_Floor, STA_Count, Retry_Rate, p_c, Airtime_Util, Time_Vec]   |
++---------------------------------------------------------------------------------+
+        |                                                                    ^
+        |                                                                    | Thực thi hành động A_t
+        v                                                                    | - Phân bổ kênh
++-----------------------+                                         +-----------------------+
+|                       |        Tạo ra phần thưởng vô hướng R_t  |                       |
+|  CHÍNH SÁCH TÁC TỬ PPO|---------------------------------------->| BỘ MÁY THỰC THI CHIẾN |
+|                       |  R_t = w1*(Tput/Tput_max)               | THUẬT LỚP MAC          |
+|                       |      - w2*max(0, Latency-15ms)^2        |                       |
++-----------------------+      - w3*(PER + mu*RET) - Penalty      +-----------------------+
 ```
 
-This decoupled architecture offloads processing from edge nodes: the OpenWrt access points handle low-latency local telemetry collection and protocol frame handling, while the Edge Server processes global policy inference. Telemetry uplink streaming uses high-throughput gRPC streaming telemetry over TCP, while dynamic parameter updates are dispatched to edge nodes via lightweight JSON-RPC control channels over WebSockets.
+#### 1. Không gian trạng thái \((\mathcal{S}\in\text{Box}(7))\)
 
-### 3.2: Core AI Engine & Robustness Architecture
+Vectơ trạng thái mà tác tử PPO quan sát tại bước thời gian $t$ gồm 7 chiều liên tục đã chuẩn hóa:
 
-The real-time orchestration engine synthesizes machine learning with system resilience mechanisms:
+$$
+S_t=\Big[\text{Norm\_RSSI},\ \text{Noise\_Floor},\ \text{STA\_Count},\ \text{Retry\_Rate},\ p_c,\ \text{Airtime\_Util},\ \text{Time\_Context\_Vector}\Big]
+$$
 
-* **Reinforcement Learning Algorithm**: Single-Agent Proximal Policy Optimization (PPO), selected for its policy convergence stability, sample efficiency, and native support for MultiDiscrete action spaces.
-* **Gymnasium Digital Twin & Chaos Engineering**: A custom Gymnasium training environment embedded with Chaos Engineering modules. During policy optimization, these modules inject synthetic perturbation vectors—including $+20\ \text{dB}$ impulse RF noise spikes, $50\%$ burst packet drop states, and simulated rogue AP broadcast floods—forcing the agent to learn robust policies that stabilize non-stationary RF environments.
-* **Preamble Field Sensing & Frame Format Detection** (US Patent 10,637,706 B2): To bypass the computational and bandwidth overhead of continuous full Channel State Information (CSI) matrix sampling, MAC-layer sensing leverages physical preamble frame auto-detection without channel matrix inversion. By inspecting incoming frame preambles, the system extracts the $4\ \mu\text{s}$ Repeated Legacy Signal Field ($\text{RL-SIG}$) located directly after the $4\ \mu\text{s}$ Legacy Signal Field ($\text{L-SIG}$).
+Trong đó:
 
-```
-+---------------+---------------+---------------+---------------+-------------------+
-|  L-STF (8µs)  |  L-LTF (8µs)  |  L-SIG (4µs)  | RL-SIG (4µs)  | HE-SIG-A (8µs)   | ...
-+---------------+---------------+---------------+---------------+-------------------+
-                                                ^
-                                                |-- Preamble Sensing Trigger
-```
+- `Norm_RSSI` $\in[0,1]$: chỉ báo cường độ tín hiệu thu trung bình của các thiết bị đã kết nối, chuẩn hóa trên khoảng $[-90\,\text{dBm},-30\,\text{dBm}]$.
+- `Noise_Floor` $\in[0,1]$: mức nhiễu RF nền, chuẩn hóa trên khoảng $[-110\,\text{dBm},-60\,\text{dBm}]$.
+- `STA_Count` $\in[0,1]$: số trạm đang kết nối, tính tương đối so với giới hạn dung lượng của ô phủ sóng.
+- `Retry_Rate` $\in[0,1]$: tỷ lệ khung được truyền lại tại lớp MAC, đo được.
+- $p_c\in[0,1]$: xác suất va chạm MAC ước lượng từ tỷ lệ thất bại RTS/CTS.
+- `Airtime_Util` $\in[0,1]$: tỷ lệ thời gian kênh bị chiếm bởi truyền dẫn đồng kênh và hoạt động OBSS.
+- `Time_Context_Vector`: mảng thời gian `[Hour, Minute, Is_Break_Time]`, mã hóa các biến động sử dụng theo chu kỳ.
 
-The receiver applies repetition detection across $\text{L-SIG}$ and $\text{RL-SIG}$. If repetition validation passes, the system evaluates the Binary Phase Shift Keying ($\text{BPSK}$) mapping rules and pilot subcarrier patterns. Normal $\text{BPSK}$ mapping versus inverted $\text{BPSK}$ mapping on data subcarriers, paired with pilot pattern selection (maintaining an even parity code with a minimum Hamming distance of 2 or 4), indicates the precise packet format ($\text{HE SU}$ vs. $\text{HE MU}$). Furthermore, evaluating the decoded $\text{L\_Rate}$ field ($6\ \text{Mbps}$ vs. $9\ \text{Mbps}$) allows the receiver to instantaneously determine the presence or absence of the High Efficiency Signal B Field ($\text{HE-SIG-B}$) prior to processing the payload. This enables rapid extraction of high-density BSS overlap metrics without degrading frame forwarding speeds.
+#### 2. Không gian hành động \((\mathcal{A}\in\text{MultiDiscrete})\)
 
-* **Polymorphic Wrapper & Dual Fail-Safe Architecture**: A Polymorphic Gym Wrapper normalizes observation states and maps continuous model outputs to discrete kernel commands. Hardware stability is guaranteed via a Dual Fail-Safe system:
-  1. **Soft Watchdog Daemon**: A local C-based user-space daemon on the OpenWrt nodes monitoring CPU usage, kernel memory, and WebSocket response latencies, resetting local hostapd processes if execution anomalies occur.
-  2. **Hard Reboot Module**: An out-of-band hardware power controller (Sonoff Smart Plug) interfaced with the Edge Server, capable of issuing a hard AC power cycle to an edge router in the event of kernel panics or total wireless driver lockups.
+Tác tử lựa chọn các vectơ hành động rời rạc điều khiển 4 tham số vật lý và lớp liên kết:
 
-### 3.3: Human-In-The-Loop (HITL) Dashboard
+$$
+\mathcal{A}=\Big\{\text{Channel\_Allocation},\ \text{Tx\_Power\_Matching},\ \text{Beacon\_Interval},\ \text{Bandwidth\_Elasticity}\Big\}
+$$
 
-Operational transparency is maintained via a Streamlit-based Human-In-The-Loop (HITL) Control Board. The dashboard aggregates real-time gRPC telemetry streams from the Edge Server, rendering spatial heatmaps, channel load factors, frame retry distributions, and active PPO action outputs.
+- **Phân bổ kênh:** chọn các kênh vận hành không chồng lấn: $\{1,6,11\}$ ở băng tần 2.4 GHz và $\{36,44,149,157\}$ ở băng tần 5 GHz.
+- **Khớp công suất phát:** chọn các mức công suất phát $\{10\,\text{dBm},14\,\text{dBm},20\,\text{dBm}\}$.
+- **Điều chỉnh khoảng thời gian Beacon:** chọn các cấu hình thời gian Beacon: $\{100\,\text{ms (lưu lượng dày đặc/giờ nghỉ)},300\,\text{ms (lưu lượng thấp/giờ học)}\}$.
+- **Tính linh hoạt băng thông và đục lỗ tiền tố:** chọn độ rộng kênh vận hành $\{20\,\text{MHz},40\,\text{MHz},80\,\text{MHz}\}$. Khi vận hành ở 80 MHz hoặc 160 MHz, tác tử có thể bật ghép kênh không liền kề IEEE 802.11ax (các chế độ đục lỗ tiền tố 4–7) nếu các kênh 20 MHz phụ bị nhiễu OBSS cản trở:
+  - **Chế độ 4:** tổng băng thông 80 MHz, đục lỗ kênh 20 MHz phụ (còn 60 MHz băng thông sử dụng được).
+  - **Chế độ 5:** tổng băng thông 80 MHz, đục lỗ một kênh 20 MHz nằm trong khối 40 MHz phụ.
+  - **Chế độ 6/7:** băng thông 160 MHz (80+80 MHz), đục lỗ các kênh 20 MHz phụ trong khối 80 MHz chính hoặc phụ.
 
-The HITL architecture grants systems administrators manual override control. Administrators can lock specific frequency bands, override auto-channel selections during maintenance windows, or issue system-wide override commands via an interactive dashboard interface.
+#### 3. Hàm thưởng phi tuyến \((R_t)\)
 
-### 3.4: Trade-Off Analysis: Green AI vs. User Quality Supremacy
+Giá trị thưởng vô hướng tại bước $t$ được xác định như sau:
 
-Power reduction methodologies (such as aggressive radio sleep states or power-saving protocols) are often featured in "Green AI" research. However, experimental evaluation indicates that aggressive radio power cycling introduces frame queuing delays, wake-up jitter, and transient packet drops.
+$$
+R_t=w_1\cdot\left(\frac{\text{Throughput}}{\text{Throughput}_{\max}}\right)-w_2\cdot\max(0,\text{Latency}-15\text{ms})^2-w_3\cdot(\text{PER}+\mu\cdot\text{Retry\_Rate})-\text{Penalty}_{\text{FailSafe}}
+$$
 
-The design doctrine of this framework enforces absolute **User Quality Supremacy**: theoretical energy savings must never compromise link quality. Maintaining peak network utility, sub-15 ms latency, and zero frame interruptions remains the primary optimization objective. Low-power states are restricted to deep off-peak idle windows determined by cyclical time context vectors. Furthermore, as established in IEEE 802.11ax specifications (Qu et al.), the Target Wake Time (TWT) mechanism serves a crucial dual function: beyond its role in station power management, TWT operates as an AP-controlled, deterministic time-domain service reservation system. The central Edge Server leverages TWT scheduling to allocate dedicated contention-free transmission windows to high-priority client streams, eliminating random CSMA/CA contention collisions.
+Trong đó $w_1,w_2,w_3,\mu>0$ là các siêu tham số điều chỉnh tỷ lệ.
 
----
+### Phân tích gradient toán học và hội tụ chính sách
 
-*Transitioning from real-time operational principles to physical execution requires formalizing the dynamic control loop mathematically and mapping policy outputs to IEEE 802.11 MAC-layer actions.*
+Để đánh giá hành vi hội tụ của chính sách, chúng ta xem xét các đạo hàm riêng của $R_t$ theo trọng số tham số và thành phần trạng thái, phân tích tác động của chúng lên các cập nhật gradient chính sách dưới hàm mục tiêu PPO $\mathcal{L}^{\text{CLIP}}(\theta)$:
 
----
+1. **Số hạng thông lượng tuyến tính có chặn** ($w_1\cdot\frac{\text{Throughput}}{\text{Throughput}_{\max}}$): đạo hàm
+   $$\frac{\partial R_t}{\partial\text{Throughput}}=\frac{w_1}{\text{Throughput}_{\max}}$$
+   tạo ra vectơ gradient dương không đổi trong trạng thái vận hành bình thường ($\text{Latency}\le15\,\text{ms}$). Điều này hướng chính sách đến lựa chọn tham số có thông lượng cao khi điều kiện liên kết ổn định.
+2. **Mức phạt độ trễ bậc hai** ($-w_2\cdot\max(0,\text{Latency}-15\text{ms})^2$): đặt độ vi phạm độ trễ là $\Delta_L=\max(0,\text{Latency}-15\text{ms})$, hành vi gradient có dạng từng đoạn:
+   $$
+   \frac{\partial R_t}{\partial\text{Latency}}=\begin{cases}0 & \text{nếu }\text{Latency}\le15\text{ms}\-2w_2\cdot\Delta_L & \text{nếu }\text{Latency}>15\text{ms}\end{cases}
+   $$
+   Khi $\text{Latency}\le15\,\text{ms}$, gradient bằng 0, ngăn việc tối thiểu hóa độ trễ làm triệt tiêu tối ưu hóa thông lượng. Tuy nhiên, khi $\text{Latency}>15\,\text{ms}$, độ lớn gradient tăng tuyến tính theo $\Delta_L$ (do đó mức phạt là bậc hai). Điều này loại bỏ hiện tượng bão hòa gradient khi tắc nghẽn nghiêm trọng, tạo ra các cập nhật lợi thế $\hat{A}_t$ lớn, buộc phân phối chính sách $\pi_\theta(a|s)$ tránh xa các hành động có độ trễ cao.
+3. **Mức phạt mất gói và truyền lại** ($-w_3\cdot(\text{PER}+\mu\cdot\text{Retry\_Rate})$): mất khung không thể khôi phục (`PER`) làm suy giảm cửa sổ TCP ở tầng trên, trong khi truyền lại (`Retry_Rate`) tiêu tốn thêm thời gian phát mà không nhất thiết làm rơi gói tin. Siêu tham số $\mu\in(0,1)$ cân bằng hai thành phần này. Vectơ gradient $\nabla_\theta R_t$ phân bổ trọng số cho giảm mất gói tương quan với truyền lại chiếm thời gian phát:
+   $$\frac{\partial R_t}{\partial\text{PER}}=-w_3,\qquad\frac{\partial R_t}{\partial\text{Retry\_Rate}}=-w_3\cdot\mu$$
+   Đặt $\mu\approx0.25$ giúp ngăn tác tử loại bỏ kênh một cách quá quyết liệt khi tranh chấp tăng đột biến trong thời gian ngắn, duy trì độ ổn định gradient và ưu tiên giảm mất khung không thể khôi phục.
+4. **Mức phạt bước an toàn dự phòng** (`Penalty_FailSafe`): nếu lựa chọn hành động dẫn đến sự cố hệ thống, tràn bộ đệm hoặc kích hoạt watchdog, một mức phạt hằng số lớn ($\text{Penalty}_{\text{FailSafe}}\gg100$) sẽ được đưa vào. Trong phương trình kỳ vọng Bellman:
+   $$V^\pi(s_t)=\mathbb{E}_{\pi}\left[R_t+\gamma V^\pi(s_{t+1})\right]$$
+   việc đưa `Penalty_FailSafe` vào làm giảm mạnh ước lượng giá trị trạng thái $V(s_t)$, tạo ra ước lượng lợi thế âm $\hat{A}_t=R_t+\gamma V(s_{t+1})-V(s_t)$. Với cơ chế cắt tỷ số chính sách PPO:
+   $$
+   \mathcal{L}^{\text{CLIP}}(\theta)=\hat{\mathbb{E}}_t\left[\min\left(r_t(\theta)\hat{A}_t,\ \text{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat{A}_t\right)\right]
+   $$
+   cập nhật lợi thế âm làm giảm tỷ số xác suất $r_t(\theta)=\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}$, hướng phân phối tìm kiếm tránh khỏi các vùng hành động dễ gây sự cố.
 
-## 4. Mathematical Formalization & MAC-Layer Operational Tactics Matrix
+### Ma trận chiến thuật vận hành lớp MAC
 
-### Context & Strategic Importance
+Khi tác tử PPO chọn một vectơ hành động, quyết định sẽ được chuyển thành các cập nhật tham số cụ thể ở cấp nhân Linux, `hostapd` và trình điều khiển, rồi thực thi trên AP mục tiêu:
 
-To convert continuous reinforcement learning inference into reliable network behavior, the real-time interaction between the agent and the wireless environment must be formalized as a Markov Decision Process (MDP). This mathematical framework ensures that action updates generated by the central PPO engine translate directly into protocol-compliant 802.11 physical and MAC layer configurations.
-
-### 4.1: Markov Decision Process (MDP) Mathematical Framework
-
-The real-time operational control loop is specified as an MDP tuple $(\mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma)$.
-
-**Formal Markov Decision Process (MDP) Specification**
-
-| MDP Element | Vector / Space Definition | Operational Parameter Mapping & Normalization |
-|---|---|---|
-| **Observation Space** $(\mathcal{S})$ | 7-Dimensional Normalized State Vector: $s_t = [\text{RSSI}_n,\ \text{CLI}_n,\ \text{LOAD}_n,\ \text{RET}_n,\ \text{NOISE}_n,\ \text{ERR}_n,\ \text{TIME}_n]^T \in \mathbb{R}^8$ | 1. $\text{RSSI}_n$: Average client RSSI ($[-100, -30]\ \text{dBm} \rightarrow [0, 1]$). 2. $\text{CLI}_n$: Active client count normalized ($[0, \text{Cap}_{\max}] \rightarrow [0, 1]$). 3. $\text{LOAD}_n$: Channel airtime utilization ($[0, 100\%] \rightarrow [0, 1]$). 4. $\text{RET}_n$: MAC-layer frame retry ratio ($[0, 1.0]$). 5. $\text{NOISE}_n$: Noise floor level ($[-110, -60]\ \text{dBm} \rightarrow [0, 1]$). 6. $\text{ERR}_n$: Frame Error Rate / PER ($[0, 1.0]$). 7. $\text{TIME}_n$: Cyclical time context: $[\sin(\frac{2\pi t}{24}),\ \cos(\frac{2\pi t}{24})]$ |
-| **Action Space** $(\mathcal{A})$ | MultiDiscrete Action Vector: $a_t = [a_{\text{chan2.4}},\ a_{\text{chan5}},\ a_{\text{txp}},\ a_{\text{beacon}}]^T$ | 1. $a_{\text{chan2.4}}$: 2.4 GHz channels $\{1, 6, 11\}$. 2. $a_{\text{chan5}}$: 5 GHz channels $\{36, 44, 149, 157\}$. 3. $a_{\text{txp}}$: Tx power ($5\ \text{dBm}$ to $23\ \text{dBm}$, $1\ \text{dBm}$ steps). 4. $a_{\text{beacon}}$: Beacon Interval ($20\ \text{ms}$ to $200\ \text{ms}$, $10\ \text{ms}$ steps). |
-| **Reward Function** $(\mathcal{R})$ | Scalar Objective Function (formalized below) | Balances spatial throughput maximization against an exponential latency penalty (triggered when average latency exceeds $15\ \text{ms}$) and frame retry penalties. |
-
-The scalar reward function $R_t$ evaluated at step $t$ is explicitly defined as:
-
-$$R_t = w_1 \left( \frac{\sum_{i=1}^{K} \text{Tput}_i}{\text{Tput}_{\max}} \right) - w_2 \cdot \max\left(0, \, \text{Latency}_{\text{avg}} - 15\ \text{ms}\right)^2 - w_3 \left( \text{PER}_t + \mu \cdot \text{RET}_t \right)$$
-
-Where $w_1 = 0.5$, $w_2 = 2.0$, and $w_3 = 1.0$ are operational weighting constants, $\text{Tput}_{\max}$ represents maximum achievable link capacity, $\text{PER}_t$ is the physical frame error rate, $\text{RET}_t$ is the MAC retry ratio, and $\mu = 0.5$ is a retry penalty scaling parameter. System discount factor $\gamma$ is constrained to $[0.95, 0.99]$ to ensure long-term policy convergence.
-
-### 4.2: MAC-Layer Deep Tactical Operational Matrix
-
-When the central PPO policy selects an action vector $a_t$, the edge node translates these decisions into direct OpenWrt kernel configurations (hostapd, iw, and nl80211 commands). The protocol execution mechanics and driver parameter targets are detailed below:
-
-**MAC-Layer Operational Tactics & Execution Matrix**
-
-| Operational Tactic | System Trigger Condition | IEEE 802.11 Protocol & Driver Execution Mechanism | Target Performance & Operational Impact |
+| Chiến thuật vận hành MAC | Cờ cấu hình trình điều khiển/Linux | Giá trị tham số tiêu chuẩn | Tác động giao thức và RF |
 |---|---|---|---|
-| **1. Basic Rate Tuning** | High channel airtime utilization ($\text{LOAD}_n > 0.70$) driven by excessive legacy management frame overhead. | Prune legacy low bitrates ($1, 2, 5.5, 11\ \text{Mbps}$ CCK / $6, 9\ \text{Mbps}$ OFDM) via hostapd: `basic_rates=180 240`, `supported_rates=180 240 360 480 540` | Suppresses airtime consumption from low-bitrate control frames, freeing spectrum capacity for high-throughput data traffic. |
-| **2. Transmit Power Matching & Spatial Reuse** | Severe co-channel interference ($\text{RET}_n > 0.15$) caused by Overlapping Basic Service Sets (OBSS). | Adjust AP cell radius via dynamic TPC and configure $\text{OBSS\_PD}$ thresholds: `he_bss_color=auto`, `obss_pd_threshold=-72`. Enforce Two NAVs mechanism (independent Intra-BSS NAV and Basic NAV counters). | Contracts cell boundaries to mitigate inter-cell interference. Two NAVs isolates intra-BSS traffic from inter-BSS CF-End resets, preventing NAV corruption. |
-| **3. Beacon Interval Adjusting** | Transitioning client density profiles (shifting from transient corridor traffic to static high-density hub states). | Dynamically modify Beacon Interval via hostapd: `beacon_int=50` (high mobility), `beacon_int=200` (static dense). | Shortens intervals during high-mobility states to accelerate client discovery, extends intervals during static states to minimize beacon overhead. |
-| **4. Geo-Spatial SSID Pruning & Beacon Baiting** | Client load imbalances across adjacent APs caused by "sticky client" association failures. | Enforce selective Probe Response suppression, hide SSIDs per client MAC via VIP filter lists, and execute targeted Beacon Baiting on underutilized adjacent AP nodes using nl80211 frame injection. | Forces sticky client STAs to disassociate from congested nodes and reassociate with underutilized target APs, balancing network load. |
-| **5. Always-On Privileged Zones** | High contention or latency spikes ($\text{Latency} > 15\ \text{ms}$) within high-priority operational zones. | Tune IEEE 802.11e/ax EDCA parameters (reducing AIFSN, CWmin, CWmax) alongside reserved TWT schedule slices: `wme_ac_vi_aifs=2`, `wme_ac_vi_cwmin=7` | Guarantees deterministic contention-free channel access and sub-15 ms latency bounds for critical enterprise streams regardless of background traffic. |
+| **Thực thi tốc độ cơ bản** | `hostapd.conf`<br>`basic_rates=120 240` | Tắt các tốc độ legacy 1, 2, 5.5, 11 Mbps; bắt buộc tốc độ cơ bản 12 Mbps hoặc 24 Mbps | Tắt các tốc độ quản lý legacy chậm, giảm thời gian phát tiêu tốn cho khung beacon và probe, giải phóng dung lượng sóng mang con cho luồng dữ liệu. |
+| **Tinh giản SSID theo không gian địa lý** | `hostapd.conf`<br>`ignore_broadcast_ssid=1` | Hạn chế phát quảng bá; điều khiển công suất phát động theo từng ô không gian | Giảm chi phí beacon của các SSID không thiết yếu trong ô mật độ cao, bảo toàn dung lượng kênh beacon. |
+| **Danh sách VIP và Beacon Baiting** | Chèn khung Scapy tùy chỉnh qua thiết bị bắt gói | Chèn các khung `Dot11Beacon` / `ProbeReq` được định hướng | Đánh thức thiết bị đầu cuối đã kết nối khỏi trạng thái ngủ sâu trước các hàng đợi đường xuống đã lập lịch, giảm các đỉnh độ trễ đuôi. |
+| **Tinh chỉnh EDCA cho vùng ưu tiên luôn hoạt động** | Registry trình điều khiển / `iw`<br>`wme_ac_vi_aifs=2`<br>`wme_ac_vi_cwmin=7`<br>`wme_ac_vi_cwmax=15` | Giảm khoảng cách giữa các khung phân xử (AIFS) và giới hạn cửa sổ tranh chấp (CW) cho hàng đợi Video/Voice | Tạo quyền ưu tiên tranh chấp cho luồng nhạy với độ trễ, bảo đảm truyền trong dưới 15 ms khi tải thiết bị đầu cuối cao. |
+| **Tái sử dụng không gian (OBSS_PD và BSS Color)** | `hostapd.conf`<br>`he_bss_color=1..63`<br>`iw dev wlan0 set obss_pd -62` | ID BSS Color 6 bit; điều chỉnh ngưỡng OBSS_PD từ -82 dBm lên -62 dBm | Cho phép trạm phân biệt khung Intra-BSS với Inter-BSS; nâng ngưỡng CCA để cho phép truyền dẫn chồng lấn đồng thời. |
+| **Tham số hóa UORA và điều khiển tranh chấp** | `hostapd.conf`<br>`uora_ocw_min=3`<br>`uora_ocw_max=7` | Điều chỉnh cửa sổ tranh chấp OFDMA (OCWmin, OCWmax) và cơ chế lùi OFDMA (OBO) | Điều chỉnh động cửa sổ tranh chấp truy nhập ngẫu nhiên trên các RU truy nhập ngẫu nhiên dựa trên trigger, theo xác suất va chạm đo được $p_c$. |
 
----
+### Cơ chế kỹ thuật của tái sử dụng không gian và điều khiển UORA
 
-## Conclusion
+#### 1. Tái sử dụng không gian thông qua BSS Coloring và OBSS_PD
 
-The Cognitive Wi-Fi 2026 framework replaces the reactive, static administrative operational paradigm of legacy wireless management with an autonomous, spatial-sensing AI framework. By integrating LiDAR pre-deployment physical profiling and heterogeneous hardware allocation with continuous real-time PPO reinforcement learning at the edge, the system delivers a verified $\ge 20\%$ reduction in capital procurement costs, a $30\% - 50\%$ acceleration in site setup timelines, and a $\ge 60\%$ improvement in end-user service quality. Structured through rigorous MDP mathematical modeling and protocol-compliant IEEE 802.11ax MAC/PHY controls, the Cognitive Wi-Fi framework provides a production-ready, highly resilient architectural foundation for enterprise wireless infrastructure deployment.
+Trong CSMA/CA truyền thống của IEEE 802.11, một trạm trì hoãn truyền dẫn bất cứ khi nào phát hiện năng lượng đồng kênh vượt ngưỡng Đánh giá kênh rỗi (CCA) tiêu chuẩn là $-82\,\text{dBm}$. Trong môi trường triển khai mật độ cao, điều này gây ra việc trì hoãn không cần thiết do các ô chồng lấn ở xa (OBSS).
+
+```text
+      Ô A (BSS Color 12)                        Ô B (BSS Color 45)
++-------------------------+                 +-------------------------+
+| [AP A]                  |                 | [AP B]                  |
+|   |                     |                 |   |                     |
+|   v (Đang truyền)       |                 |   v (Muốn truyền)       |
+| [STA A1]                |                 | [STA B1]                |
++-------------------------+                 +-------------------------+
+             \                                   /
+              \--- Nhận được khung liên BSS ---/
+                   Cường độ tín hiệu: -72 dBm
+
+CSMA/CA cũ: -72 dBm > ngưỡng CCA -82 dBm -> TRÌ HOÃN TRUYỀN (bị chặn)
+802.11ax SR: BSS Color 12 != 45 (liên BSS)
+            -72 dBm < ngưỡng OBSS_PD -62 dBm -> TRUYỀN SONG SONG
+```
+
+Trong chiến thuật tái sử dụng không gian, mỗi khung IEEE 802.11ax có trường BSS Color 6 bit trong tiêu đề PHY (giá trị 1–63). Khi trạm nhận phát hiện khung đến, nó kiểm tra BSS Color:
+
+- **Khung Intra-BSS (màu khớp):** trạm áp dụng ngưỡng CCA tiêu chuẩn ($-82\,\text{dBm}$).
+- **Khung Inter-BSS (màu khác):** trạm áp dụng ngưỡng OBSS_PD cao hơn (ví dụ $-62\,\text{dBm}$).
+
+Nếu cường độ tín hiệu nhận của khung Inter-BSS thấp hơn ngưỡng OBSS_PD đã nâng (ví dụ $-72\,\text{dBm}<-62\,\text{dBm}$), trạm xem kênh là rỗi và bắt đầu truyền song song trên cùng kênh, làm tăng dung lượng không gian tổng hợp.
+
+#### 2. Điều khiển truy nhập ngẫu nhiên dựa trên UL OFDMA (UORA)
+
+Khi AP lập lịch truyền đường lên bằng các khung Trigger (TF), một số RU được chỉ định cho truy nhập ngẫu nhiên bằng cách gán trường con Association ID là $\text{AID12}=0$. Các trạm đầu cuối tranh chấp những RU truy nhập ngẫu nhiên này thực thi giao thức UORA:
+
+```text
+[AP gửi khung Trigger] -> Cho biết N_RU RU truy nhập ngẫu nhiên (AID12 = 0)
+        |
+[STA 1 thực thi UORA]
+  - Duy trì bộ đếm lùi OFDMA (OBO) ~ Uniform(0, OCW)
+  - Kiểm tra số RU khả dụng:
+      Nếu OBO < N_RU:
+          OBO = 0 -> Chọn RU ngẫu nhiên -> Truyền khung dữ liệu đường lên
+      Ngược lại:
+          OBO = OBO - N_RU -> Chờ khung Trigger tiếp theo
+```
+
+Mỗi trạm duy trì bộ đếm lùi OFDMA (`OBO`) được lấy theo phân bố đều trên $[0,\text{OCW}]$, trong đó `OCW` là Cửa sổ tranh chấp OFDMA ($\text{OCW}_{\min}\le\text{OCW}\le\text{OCW}_{\max}$). Các tham số $\text{OCW}_{\min}$ và $\text{OCW}_{\max}$ được quảng bá trong khung Beacon. Khi khung Trigger đến với $N_{\text{RU}}$ RU truy nhập ngẫu nhiên:
+
+- Nếu $\text{OBO}<N_{\text{RU}}$, trạm đặt $\text{OBO}=0$, chọn ngẫu nhiên một RU trong số các RU ứng viên và truyền gói đường lên.
+- Nếu $\text{OBO}\ge N_{\text{RU}}$, trạm giảm bộ đếm ($\text{OBO}\leftarrow\text{OBO}-N_{\text{RU}}$) và hoãn truyền đến khung Trigger tiếp theo.
+
+Nếu xảy ra va chạm trên RU truy nhập ngẫu nhiên (thể hiện qua việc thiếu xác nhận khối đa người dùng Multi-User Block ACK), trạm tăng gấp đôi cửa sổ tranh chấp ($\text{OCW}\leftarrow\min(2\cdot\text{OCW}+1,\text{OCW}_{\max})$). Tác tử PPO động theo dõi xác suất va chạm MAC $p_c$ qua telemetry gRPC. Khi $p_c$ tăng trong các giai đoạn mật độ cao, tác tử điều chỉnh $\text{OCW}_{\min}$ và $\text{OCW}_{\max}$ trong các khung Beacon, duy trì tính ổn định của UORA và ngăn chuỗi va chạm truy nhập ngẫu nhiên lan rộng.
+
+### Tổng hợp hệ thống và kết luận
+
+Hệ thống Tối ưu hóa Cognitive Wi-Fi đầu cuối (KHKT 2026) hợp nhất kỹ thuật hạ tầng vô tuyến vật lý với các vòng điều khiển học tăng cường động. Bằng cách kết nối thu thập đặc trưng không gian (quét LiDAR, mô phỏng truy vết tia 3D, phân hạng phần cứng theo mật độ) với lớp vận hành tự chủ (cảm biến kép không cần CSI, tác tử PPO được huấn luyện với Chaos Engineering và cơ chế an toàn dự phòng nhiều tầng), khuôn khổ này giải quyết các giới hạn mang tính cấu trúc của hạ tầng Wi-Fi tĩnh. Các tham số tiện ích trừu tượng được ánh xạ trực tiếp thành những chiến thuật MAC IEEE 802.11ax mức thấp, bao gồm BSS Coloring, thiết lập ngưỡng tái sử dụng không gian, đục lỗ tiền tố, chia RU theo sóng mang con và quản lý tranh chấp UORA. Dưới sự dẫn dắt của triết lý Thượng Tôn Chất Lượng Người Dùng, khuôn khổ tích hợp hướng tới đáp ứng các chuẩn hiệu năng định lượng: giảm chi phí đầu tư ít nhất 20%, giảm chi phí vận hành thiết lập 30–50% và cải thiện tổng thể tiện ích, chất lượng Wi-Fi trên 60% so với mô hình triển khai tĩnh truyền thống.

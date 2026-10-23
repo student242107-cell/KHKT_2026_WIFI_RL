@@ -289,11 +289,15 @@ class MultiAPTelemetryETL:
             ssh.connect(ip, username=self.router_user, password=self.router_pass, timeout=3)
             cmd = (
                 "echo '===BAND_2G==='; "
-                "iw dev phy0-ap0 station dump 2>/dev/null; "
+                "for dev in /sys/class/net/phy0-ap*; do "
+                "  [ -e \"$dev\" ] && iw dev $(basename $dev) station dump 2>/dev/null; "
+                "done; "
                 "echo '===SURVEY==='; "
                 "iw dev phy0-ap0 survey dump 2>/dev/null; "
                 "echo '===BAND_5G==='; "
-                "iw dev phy1-ap0 station dump 2>/dev/null; "
+                "for dev in /sys/class/net/phy1-ap*; do "
+                "  [ -e \"$dev\" ] && iw dev $(basename $dev) station dump 2>/dev/null; "
+                "done; "
                 "echo '===SURVEY==='; "
                 "iw dev phy1-ap0 survey dump 2>/dev/null"
             )

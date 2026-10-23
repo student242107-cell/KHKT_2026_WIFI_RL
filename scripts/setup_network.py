@@ -16,6 +16,10 @@ SSID_5G = os.getenv("WIFI_SSID_5G", "KHKT_Testbed 5GHz")
 SSID_2G = os.getenv("WIFI_SSID_2G", "KHKT_Testbed 2.4 GHz")
 WIFI_PASS = os.getenv("WIFI_PASSWORD", "0776642209")
 WIFI_ENC = os.getenv("WIFI_ENCRYPTION", "psk2")
+
+TEACHER_SSID = os.getenv("TEACHER_SSID", "School_Teacher")
+TEACHER_PASS = os.getenv("TEACHER_PASSWORD", "TeacherPassword456")
+ONBOARD_SSID = os.getenv("ONBOARD_SSID", "School_Onboarding")
 MOB_DOMAIN = os.getenv("MOBILITY_DOMAIN", "abcd")
 
 CONFIG_PATH = "configs/network_config.yaml"
@@ -43,30 +47,52 @@ def run_ssh_script(ip, commands, node_name):
         ssh.close()
 
 
-def build_wireless_commands(ssid_suffix=""):
-    """Tạo bộ lệnh chuẩn hóa Wi-Fi 6 (802.11ax) + Fast Roaming (802.11r) cho Xiaomi AX3000T."""
+def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
+    """
+    Quy hoạch Virtual BSSID/SSID thông minh theo Phân vùng (Zone Role):
+    - classroom: Bật Student (5G+2.4G) + Bật Onboarding (2.4G) + Tắt tạm Teacher (5G) chờ kích hoạt động.
+    - privileged_office (Phòng Giáo viên): Tắt Student, Chỉ bật Teacher (Always-On) + Hạ công suất 12dBm chống lọt sóng.
+    """
     ssid_2g_full = f"{SSID_2G}{ssid_suffix}"
     ssid_5g_full = f"{SSID_5G}{ssid_suffix}"
+    teacher_ssid_full = f"{TEACHER_SSID}{ssid_suffix}"
+
+    is_office = (zone_type.lower() == "privileged_office")
+    student_disabled = "1" if is_office else "0"
+    onboard_disabled = "1" if is_office else "0"
+    teacher_disabled = "0" if is_office else "1"  # Phòng học mặc định tỉa (ẩn) mạng Teacher khi chưa có GV
+    txpower_5g = "12" if is_office else "20"      # Phòng GV giới hạn 12dBm để không lọt Beacon ra hành lang
 
     return [
-        # Cấu hình Radio0 (2.4GHz)
+        # 1. Cấu hình Phần cứng Radio0 (2.4GHz) & Mạng Học sinh 2.4GHz
         "uci set wireless.radio0.disabled='0'",
         "uci set wireless.radio0.band='2g'",
+        "uci set wireless.radio0.channel='6'",
         "uci set wireless.radio0.htmode='HE20'",
+        "uci set wireless.default_radio0.device='radio0'",
         "uci set wireless.default_radio0.mode='ap'",
         "uci set wireless.default_radio0.network='lan'",
         f"uci set wireless.default_radio0.ssid='{ssid_2g_full}'",
         f"uci set wireless.default_radio0.encryption='{WIFI_ENC}'",
         f"uci set wireless.default_radio0.key='{WIFI_PASS}'",
-        "uci set wireless.default_radio0.ieee80211r='1'",
-        f"uci set wireless.default_radio0.mobility_domain='{MOB_DOMAIN}'",
-        "uci set wireless.default_radio0.ft_over_ds='0'",
-        "uci set wireless.default_radio0.ft_psk_generate_local='1'",
+        f"uci set wireless.default_radio0.disabled='{student_disabled}'",
 
-        # Cấu hình Radio1 (5GHz)
+        # 2. Tạo Virtual AP 'onboarding_2g' trên Radio0 (Mạng Mở cho Giáo viên đăng ký MAC lần đầu)
+        "uci set wireless.onboarding_2g=wifi-iface",
+        "uci set wireless.onboarding_2g.device='radio0'",
+        "uci set wireless.onboarding_2g.mode='ap'",
+        "uci set wireless.onboarding_2g.network='lan'",
+        f"uci set wireless.onboarding_2g.ssid='{ONBOARD_SSID}'",
+        "uci set wireless.onboarding_2g.encryption='none'",
+        f"uci set wireless.onboarding_2g.disabled='{onboard_disabled}'",
+
+        # 3. Cấu hình Phần cứng Radio1 (5GHz) & Mạng Học sinh 5GHz
         "uci set wireless.radio1.disabled='0'",
         "uci set wireless.radio1.band='5g'",
+        "uci set wireless.radio1.channel='36'",
         "uci set wireless.radio1.htmode='HE40'",
+        f"uci set wireless.radio1.txpower='{txpower_5g}'",
+        "uci set wireless.default_radio1.device='radio1'",
         "uci set wireless.default_radio1.mode='ap'",
         "uci set wireless.default_radio1.network='lan'",
         f"uci set wireless.default_radio1.ssid='{ssid_5g_full}'",
@@ -76,12 +102,28 @@ def build_wireless_commands(ssid_suffix=""):
         f"uci set wireless.default_radio1.mobility_domain='{MOB_DOMAIN}'",
         "uci set wireless.default_radio1.ft_over_ds='0'",
         "uci set wireless.default_radio1.ft_psk_generate_local='1'",
+        f"uci set wireless.default_radio1.disabled='{student_disabled}'",
+
+        # 4. Tạo Virtual AP 'teacher_5g' trên Radio1 (Mạng Ưu tiên Giáo viên - Dynamic SSID Pruning)
+        "uci set wireless.teacher_5g=wifi-iface",
+        "uci set wireless.teacher_5g.device='radio1'",
+        "uci set wireless.teacher_5g.mode='ap'",
+        "uci set wireless.teacher_5g.network='lan'",
+        f"uci set wireless.teacher_5g.ssid='{teacher_ssid_full}'",
+        f"uci set wireless.teacher_5g.encryption='{WIFI_ENC}'",
+        f"uci set wireless.teacher_5g.key='{TEACHER_PASS}'",
+        "uci set wireless.teacher_5g.ieee80211r='1'",
+        f"uci set wireless.teacher_5g.mobility_domain='{MOB_DOMAIN}'",
+        "uci set wireless.teacher_5g.ft_over_ds='0'",
+        "uci set wireless.teacher_5g.ft_psk_generate_local='1'",
+        f"uci set wireless.teacher_5g.disabled='{teacher_disabled}'",
+
         "uci commit wireless"
     ]
 
 
 def provision_master_node(node, gateway_ip):
-    """Cấu hình cho Router Master: Bật DHCP Server và giữ vai trò Gateway chính."""
+    zone_type = node.get("zone_type", "classroom")
     cmds = [
         "uci set dhcp.lan.ignore='0'",
         "uci set dhcp.lan.start='100'",
@@ -90,50 +132,37 @@ def provision_master_node(node, gateway_ip):
         "uci commit dhcp",
         "/etc/init.d/dnsmasq enable",
         "/etc/init.d/dnsmasq restart"
-    ] + build_wireless_commands(node.get("ssid_suffix", "")) + ["wifi reload"]
+    ] + build_wireless_commands(node.get("ssid_suffix", ""), zone_type) + ["wifi reload"]
 
-    run_ssh_script(node["ip"], cmds, f"[MASTER] {node['name']}")
+    run_ssh_script(node["ip"], cmds, f"[MASTER - {zone_type.upper()}] {node['name']}")
 
 
 def provision_dumb_ap_node(node, gateway_ip):
-    """
-    Cấu hình cho các Router phụ (AP1, AP2, ... AP_N) thành Dumb AP thuần túy:
-    1. Tắt hoàn toàn DHCPv4 và DHCPv6 trên AP để không xung đột với Master.
-    2. Trỏ Default Gateway và DNS về Master (192.168.2.1).
-    3. Gộp cổng WAN vào br-lan (DSA Bridge) và xóa giao diện wan/wan6 để cắm cổng nào cũng là LAN.
-    4. Tắt Firewall trên AP để Laptop Edge Server SSH/Telemetry xuyên suốt.
-    """
+    zone_type = node.get("zone_type", "classroom")
     cmds = [
-        # 1. Trỏ Gateway & DNS về Router Master
         f"uci set network.lan.gateway='{gateway_ip}'",
         f"uci set network.lan.dns='{gateway_ip}'",
-
-        # 2. Gộp cổng vật lý 'wan' vào chung cầu nối 'br-lan' (Biến cổng WAN thành cổng LAN thứ 4)
         "uci -q del_list network.@device[0].ports='wan' || true",
         "uci add_list network.@device[0].ports='wan'",
         "uci -q delete network.wan || true",
         "uci -q delete network.wan6 || true",
         "uci commit network",
-
-        # 3. Tắt cấp phát IP (DHCPv4 & IPv6 RA/DHCPv6) trên AP
         "uci set dhcp.lan.ignore='1'",
         "uci -q delete dhcp.lan.ra || true",
         "uci -q delete dhcp.lan.dhcpv6 || true",
         "uci commit dhcp",
-
-        # 4. Vô hiệu hóa dnsmasq, odhcpd và firewall để hoạt động như AP Layer-2 thuần túy
         "/etc/init.d/dnsmasq stop || true",
         "/etc/init.d/dnsmasq disable || true",
         "/etc/init.d/odhcpd stop || true",
         "/etc/init.d/odhcpd disable || true",
         "/etc/init.d/firewall stop || true",
         "/etc/init.d/firewall disable || true",
-    ] + build_wireless_commands(node.get("ssid_suffix", "")) + [
+    ] + build_wireless_commands(node.get("ssid_suffix", ""), zone_type) + [
         "/etc/init.d/network reload",
         "wifi reload"
     ]
 
-    run_ssh_script(node["ip"], cmds, f"[DUMB-AP] {node['name']}")
+    run_ssh_script(node["ip"], cmds, f"[DUMB-AP - {zone_type.upper()}] {node['name']}")
 
 
 def main():
@@ -149,7 +178,7 @@ def main():
     nodes = topo.get("nodes", [])
 
     print("==================================================================")
-    print(f" 🚀 AUTO-PROVISIONING: QUY HOẠCH {len(nodes)} THIẾT BỊ TRONG TOPOLOGY")
+    print(f" 🚀 AUTO-PROVISIONING: QUY HOẠCH {len(nodes)} THIẾT BỊ & VIRTUAL SSIDs")
     print("==================================================================")
 
     for node in nodes:
