@@ -5,7 +5,6 @@ import os
 import json
 import argparse
 import yaml
-from datetime import datetime
 from dotenv import load_dotenv
 from stable_baselines3 import PPO
 
@@ -26,6 +25,7 @@ parser.add_argument('--band', type=str, choices=['2.4G', '5G'], default='5G', he
 parser.add_argument('--interval', type=int, default=10, help='Chu kỳ điều khiển AI (giây)')
 args = parser.parse_args()
 
+
 def load_ap_map(band):
     try:
         with open(CONFIG_PATH, 'r') as file:
@@ -37,6 +37,7 @@ def load_ap_map(band):
     except Exception as e:
         logging.error(f"Lỗi đọc file cấu hình mạng {CONFIG_PATH}: {e}")
         return {}
+
 
 AP_MAP = load_ap_map(args.band)
 if not AP_MAP:
@@ -57,11 +58,12 @@ else:
     BANDWIDTHS = ["HE20", "HE40", "HE40"]
 
 BEACON_INTS = [80, 300]
-OBSS_PD_LEVELS = [-82, -77, -72, -67, -62]
 PROCESSED_DATA_PATH = "data/processed/per_ap_state.json"
 
+# Khởi tạo trạng thái mặc định ban đầu của các Router là Kênh 36 (idx 0), HE40 (idx 1)
 previous_actions = {}
 ai_logger = AILogger()
+
 
 def get_per_ap_states():
     if not os.path.exists(PROCESSED_DATA_PATH):
@@ -101,7 +103,7 @@ def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected
 
     target_channel = CHANNELS[ch_idx]
     target_bw = BANDWIDTHS[bw_idx]
-    target_tx = 14 + tx_idx
+    target_tx = 16 + (tx_idx % 5)  # Đảm bảo công suất phát mạnh mẽ 16..20 dBm
     target_mcs = mcs_idx
     target_beacon = BEACON_INTS[beacon_idx]
     target_beamform = True if beamform_idx == 1 else False
@@ -123,10 +125,8 @@ def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected
         beacon_int=target_beacon,
         enable_bf=target_beamform
     )
-    # Áp dụng thêm khóa giới hạn MCS nếu mạng nghẽn
     actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
 
-    # Ghi log lịch sử hành động
     status = "Executed" if success else "Failed"
     ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
 
@@ -151,40 +151,61 @@ def main():
     while True:
         try:
             per_ap_states = get_per_ap_states()
-            occupied_channels = [] # Bộ điều phối đa trạm: lưu các kênh đã bị các AP chọn
+            occupied_channels = []
 
             for bssid, state in per_ap_states.items():
                 target_ip = AP_MAP[bssid]
+                sta_cnt = int(state[4])
+                p_c_val = float(state[1])
+                airtime_val = float(state[3])
+
                 logging.info(
                     f"📊 Khám AP {target_ip} [{bssid}] "
-                    f"(STAs={int(state[4])}, RSSI={state[0]:.1f}dBm, p_c={state[1]:.3f}, Airtime={state[3]:.2%})"
+                    f"(STAs={sta_cnt}, RSSI={state[0]:.1f}dBm, p_c={p_c_val:.3f}, Airtime={airtime_val:.2%})"
                 )
 
                 action, _ = model.predict(state, deterministic=True)
-                
-                # Multi-AP Channel Coordinator: Tránh việc AP sau chọn đè kênh AP trước
+                action = np.array(action, dtype=int)
+
+                # 1. Điều phối Băng thông theo tải thực tế của từng AP:
+                # Nếu AP đang chịu bão tải (p_c > 0.25 hoặc Airtime > 55% và có >= 2 STAs) -> Bóp về HE20 (idx 0)
+                # Ngược lại nếu AP rảnh hoặc chỉ có 0-1 STA -> Mở rộng HE40/HE80 để tối đa hóa tốc độ!
+                if sta_cnt >= 2 and (p_c_val > 0.25 or airtime_val > 0.55):
+                    action[1] = 0  # HE20 chống nghẽn
+                elif sta_cnt <= 1:
+                    action[1] = 2  # HE80 cho AP ít thiết bị
+
+                # 2. Bộ điều phối Kênh Đa Trạm (Orthogonal Multi-AP Channel Coordinator)
                 ch_idx = int(action[0])
                 if ch_idx in occupied_channels:
-                    # Nếu kênh bị chiếm, tự động đẩy sang kênh trực giao liền kề chưa bị chiếm
                     available_chs = [i for i in range(len(CHANNELS)) if i not in occupied_channels]
                     if available_chs:
                         action[0] = available_chs[0]
-                        logging.info(f"   [Coordinator] Đã điều phối lại Kênh cho {target_ip} để tránh CCI nội bộ.")
+                        logging.info(f"   [Coordinator] Tự động tách Kênh cho {target_ip} sang CH={CHANNELS[action[0]]} để triệt tiêu CCI.")
                 occupied_channels.append(int(action[0]))
 
                 prev_action = previous_actions.get(bssid)
-                if prev_action is None or not np.array_equal(action, prev_action):
-                    oracle_twin.previous_action = prev_action
+                # Chỉ kích hoạt đổi cấu hình khi thay đổi Kênh (action[0]) hoặc Băng thông (action[1])
+                is_radio_changed = (prev_action is None) or (action[0] != prev_action[0]) or (action[1] != prev_action[1])
+
+                if is_radio_changed:
+                    # So sánh điểm thưởng của Action mới với cấu hình mặc định đang bị nghẽn (CH36=0, HE40=1)
+                    baseline_action = prev_action if prev_action is not None else np.array([0, 1, 2, 7, 0, 2, 1])
+                    oracle_twin.previous_action = None
+                    current_reward = oracle_twin.simulate_future(state, baseline_action)
                     expected_reward = oracle_twin.simulate_future(state, action)
+                    delta_gain = expected_reward - current_reward
 
-                    logging.info(f"   [Oracle] Điểm thưởng dự đoán tương lai: {expected_reward:.2f}")
+                    logging.info(
+                        f"   [Oracle] Điểm cấu hình mới: {expected_reward:.2f} "
+                        f"(So với hiện tại: {delta_gain:+.2f})"
+                    )
 
-                    # Chỉ phủ quyết nếu expected_reward thực sự quá âm (< -1.0)
-                    if expected_reward < -1.0:
+                    if expected_reward < -2.5 and delta_gain < 0.0:
                         logging.warning("   [CẢNH BÁO] Oracle phủ quyết lệnh này! Giữ nguyên cấu hình cũ.")
                         ai_logger.log_action(target_ip, bssid, state, action, expected_reward, "Vetoed")
                     else:
-                        logging.info("   ✅ Lệnh an toàn. Đang thực thi xuống OpenWrt...")
+                        logging.info("   ✅ Lệnh tối ưu đã được Oracle phê duyệt. Đang thực thi xuống OpenWrt...")
                         execute_ai_action_for_ap(target_ip, bssid, state, action, expected_reward)
                         previous_actions[bssid] = action.copy()
 
