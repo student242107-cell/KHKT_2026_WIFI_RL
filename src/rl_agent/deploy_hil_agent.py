@@ -10,6 +10,7 @@ from stable_baselines3 import PPO
 
 from src.modules import wifi_actuators as actuators
 from src.envs.digital_twin_env import UltimateDigitalTwinEnv
+from src.utils.logger import AILogger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -45,7 +46,6 @@ if not AP_MAP:
 
 logging.info(f"Đã nạp bản đồ mạng ({args.band}): Tối ưu hóa cho {len(AP_MAP)} APs: {AP_MAP}")
 
-# Ánh xạ chuẩn xác cho phần cứng Xiaomi AX3000T (OpenWrt MediaTek Filogic 820)
 if args.band == '5G':
     TARGET_RADIO = "radio1"
     TARGET_IFACE = "phy1-ap0"
@@ -58,17 +58,17 @@ else:
     BANDWIDTHS = ["HE20", "HE40", "HE40"]
 
 BEACON_INTS = [80, 300]
-OBSS_PD_LEVELS = [-82, -77, -72, -67, -62]
 PROCESSED_DATA_PATH = "data/processed/per_ap_state.json"
 
+# Khởi tạo trạng thái mặc định ban đầu của các Router là Kênh 36 (idx 0), HE40 (idx 1)
 previous_actions = {}
+ai_logger = AILogger()
 
 
 def get_per_ap_states():
     if not os.path.exists(PROCESSED_DATA_PATH):
         logging.warning("Chưa có dữ liệu Telemetry. Trả về rỗng.")
         return {}
-
     try:
         with open(PROCESSED_DATA_PATH, 'r') as f:
             json_data = json.load(f)
@@ -86,36 +86,34 @@ def get_per_ap_states():
                     data["minute"],
                     data["is_break_time"]
                 ], dtype=np.float32)
-
                 state_array = np.clip(
                     state_array,
                     a_min=[-90.0, 0.0, 0.0, 0.0, 0, 0, 0, 0],
                     a_max=[-30.0, 1.0, 1.0, 1.0, 300, 23, 59, 1]
                 )
                 states[bssid.upper()] = state_array
-
         return states
-
     except Exception as e:
         logging.error(f"Lỗi đọc JSON State: {e}")
         return {}
 
 
-def execute_ai_action_for_ap(target_ip, action_array):
+def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected_reward):
     ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
 
     target_channel = CHANNELS[ch_idx]
     target_bw = BANDWIDTHS[bw_idx]
-    target_tx = 14 + tx_idx
+    target_tx = 16 + (tx_idx % 5)  # Đảm bảo công suất phát mạnh mẽ 16..20 dBm
+    target_mcs = mcs_idx
     target_beacon = BEACON_INTS[beacon_idx]
     target_beamform = True if beamform_idx == 1 else False
 
     logging.info(
         f"👉 Kê đơn cho AP {target_ip} ({TARGET_RADIO}/{TARGET_IFACE}): "
-        f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, Beacon={target_beacon}ms"
+        f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS={target_mcs}, Beacon={target_beacon}ms"
     )
 
-    actuators.apply_ai_profile_atomic(
+    success = actuators.apply_ai_profile_atomic(
         ap_ip=target_ip,
         username=USER,
         password=PWD,
@@ -127,6 +125,10 @@ def execute_ai_action_for_ap(target_ip, action_array):
         beacon_int=target_beacon,
         enable_bf=target_beamform
     )
+    actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
+
+    status = "Executed" if success else "Failed"
+    ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
 
 
 def main():
@@ -140,7 +142,7 @@ def main():
             "lr_schedule": lambda _: 0.0,
             "clip_range": lambda _: 0.2,
         }
-        model = PPO.load(MODEL_PATH, custom_objects=custom_objects)
+        model = PPO.load(MODEL_PATH, custom_objects=custom_objects, device="cpu")
         oracle_twin = UltimateDigitalTwinEnv()
     except Exception as e:
         logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")
@@ -149,28 +151,62 @@ def main():
     while True:
         try:
             per_ap_states = get_per_ap_states()
+            occupied_channels = []
 
             for bssid, state in per_ap_states.items():
                 target_ip = AP_MAP[bssid]
+                sta_cnt = int(state[4])
+                p_c_val = float(state[1])
+                airtime_val = float(state[3])
+
                 logging.info(
                     f"📊 Khám AP {target_ip} [{bssid}] "
-                    f"(STAs={int(state[4])}, RSSI={state[0]:.1f}dBm, p_c={state[1]:.3f}, Airtime={state[3]:.2%})"
+                    f"(STAs={sta_cnt}, RSSI={state[0]:.1f}dBm, p_c={p_c_val:.3f}, Airtime={airtime_val:.2%})"
                 )
 
                 action, _ = model.predict(state, deterministic=True)
+                action = np.array(action, dtype=int)
+
+                # 1. Điều phối Băng thông theo tải thực tế của từng AP:
+                # Nếu AP đang chịu bão tải (p_c > 0.25 hoặc Airtime > 55% và có >= 2 STAs) -> Bóp về HE20 (idx 0)
+                # Ngược lại nếu AP rảnh hoặc chỉ có 0-1 STA -> Mở rộng HE40/HE80 để tối đa hóa tốc độ!
+                if sta_cnt >= 2 and (p_c_val > 0.25 or airtime_val > 0.55):
+                    action[1] = 0  # HE20 chống nghẽn
+                elif sta_cnt <= 1:
+                    action[1] = 2  # HE80 cho AP ít thiết bị
+
+                # 2. Bộ điều phối Kênh Đa Trạm (Orthogonal Multi-AP Channel Coordinator)
+                ch_idx = int(action[0])
+                if ch_idx in occupied_channels:
+                    available_chs = [i for i in range(len(CHANNELS)) if i not in occupied_channels]
+                    if available_chs:
+                        action[0] = available_chs[0]
+                        logging.info(f"   [Coordinator] Tự động tách Kênh cho {target_ip} sang CH={CHANNELS[action[0]]} để triệt tiêu CCI.")
+                occupied_channels.append(int(action[0]))
 
                 prev_action = previous_actions.get(bssid)
-                if prev_action is None or not np.array_equal(action, prev_action):
-                    oracle_twin.previous_action = prev_action
+                # Chỉ kích hoạt đổi cấu hình khi thay đổi Kênh (action[0]) hoặc Băng thông (action[1])
+                is_radio_changed = (prev_action is None) or (action[0] != prev_action[0]) or (action[1] != prev_action[1])
+
+                if is_radio_changed:
+                    # So sánh điểm thưởng của Action mới với cấu hình mặc định đang bị nghẽn (CH36=0, HE40=1)
+                    baseline_action = prev_action if prev_action is not None else np.array([0, 1, 2, 7, 0, 2, 1])
+                    oracle_twin.previous_action = None
+                    current_reward = oracle_twin.simulate_future(state, baseline_action)
                     expected_reward = oracle_twin.simulate_future(state, action)
+                    delta_gain = expected_reward - current_reward
 
-                    logging.info(f"   [Oracle] Điểm thưởng dự đoán tương lai: {expected_reward:.2f}")
+                    logging.info(
+                        f"   [Oracle] Điểm cấu hình mới: {expected_reward:.2f} "
+                        f"(So với hiện tại: {delta_gain:+.2f})"
+                    )
 
-                    if expected_reward < 0.0:
+                    if expected_reward < -2.5 and delta_gain < 0.0:
                         logging.warning("   [CẢNH BÁO] Oracle phủ quyết lệnh này! Giữ nguyên cấu hình cũ.")
+                        ai_logger.log_action(target_ip, bssid, state, action, expected_reward, "Vetoed")
                     else:
-                        logging.info("   ✅ Lệnh an toàn. Đang thực thi xuống OpenWrt...")
-                        execute_ai_action_for_ap(target_ip, action)
+                        logging.info("   ✅ Lệnh tối ưu đã được Oracle phê duyệt. Đang thực thi xuống OpenWrt...")
+                        execute_ai_action_for_ap(target_ip, bssid, state, action, expected_reward)
                         previous_actions[bssid] = action.copy()
 
             time.sleep(args.interval)

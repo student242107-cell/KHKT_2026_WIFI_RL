@@ -42,8 +42,6 @@ def select_active_channels(beacon_counts, channels=CHANNELS, max_channels=2):
 
 
 class SmartChannelHopper:
-    """Cơ chế Tự động Khóa Kênh Đông Nhất cho --mode scapy."""
-
     def __init__(self, iface_mon, all_channels=CHANNELS,
                  scan_duration=CHANNEL_SCAN_SECONDS,
                  dwell_time=CHANNEL_DWELL_SECONDS):
@@ -130,7 +128,6 @@ class MultiAPTelemetryETL:
             )
 
     def _load_nodes_from_yaml(self):
-        """Đọc danh sách toàn bộ các Node (cả 2.4GHz và 5GHz) từ configs/network_config.yaml."""
         if not os.path.exists(CONFIG_PATH):
             return []
         try:
@@ -141,7 +138,6 @@ class MultiAPTelemetryETL:
                 if nodes:
                     return nodes
 
-                # Fallback nếu file YAML cũ chỉ có ap_map và ap_map_2g
                 ip_dict = {}
                 for bssid, ip in topo.get("ap_map", {}).items():
                     ip_dict.setdefault(ip, {"name": f"AP_{ip}", "ip": ip})["bssid_5g"] = bssid.upper()
@@ -196,12 +192,8 @@ class MultiAPTelemetryETL:
                     self.zone,
                 ])
 
-    # ==========================================================================
-    # NHÁNH 1: CHẾ ĐỘ OPENWRT DUAL-BAND POLLING (--mode openwrt)
-    # Tự động lấy cả 2.4GHz (phy0-ap0) và 5GHz (phy1-ap0) trong 1 lần SSH!
-    # ==========================================================================
     def _parse_iface_section(self, bssid, band_label, section_text):
-        """Bóc tách station dump & survey dump cho 1 băng tần cụ thể."""
+        """Bóc tách station dump & survey dump chuẩn xác cho chip MediaTek mt76."""
         parts = section_text.split("===SURVEY===")
         station_raw = parts[0] if len(parts) > 0 else ""
         survey_raw = parts[1] if len(parts) > 1 else ""
@@ -213,25 +205,31 @@ class MultiAPTelemetryETL:
         avg_rssi = float(np.mean(rssi_vals)) if rssi_vals else -90.0
 
         tx_pkts = sum(int(x) for x in re.findall(r"tx packets:\s*(\d+)", station_raw))
+        rx_pkts = sum(int(x) for x in re.findall(r"rx packets:\s*(\d+)", station_raw))
         tx_retries = sum(int(x) for x in re.findall(r"tx retries:\s*(\d+)", station_raw))
         tx_failed = sum(int(x) for x in re.findall(r"tx failed:\s*(\d+)", station_raw))
 
+        # Tách riêng từng khối Survey data của từng kênh để không bị nhảy dòng Regex
         active_time, busy_time = 0, 0
-        in_use_blocks = re.findall(
-            r"Survey data from.*?\n(?:\t.*?\n)*?\tfrequency:.*?\[in use\]\n((?:\t.*?\n)+)",
-            survey_raw
-        )
-        if in_use_blocks:
-            block = in_use_blocks[0]
-            act_m = re.search(r"channel active time:\s*(\d+)", block)
-            bsy_m = re.search(r"channel busy time:\s*(\d+)", block)
-            if act_m and bsy_m:
-                active_time = int(act_m.group(1))
-                busy_time = int(bsy_m.group(1))
+        survey_blocks = survey_raw.split("Survey data from")
+        for blk in survey_blocks:
+            if "[in use]" in blk:
+                act_m = re.search(r"channel active time:\s*(\d+)", blk)
+                bsy_m = re.search(r"channel busy time:\s*(\d+)", blk)
+                rx_m = re.search(r"channel receive time:\s*(\d+)", blk)
+                tx_m = re.search(r"channel transmit time:\s*(\d+)", blk)
+                if act_m:
+                    active_time = int(act_m.group(1))
+                    raw_busy = int(bsy_m.group(1)) if bsy_m else 0
+                    raw_rx = int(rx_m.group(1)) if rx_m else 0
+                    raw_tx = int(tx_m.group(1)) if tx_m else 0
+                    busy_time = max(raw_busy, raw_rx + raw_tx)
+                    break
 
         prev = self.prev_openwrt_counters.get(bssid)
         self.prev_openwrt_counters[bssid] = {
             "tx_pkts": tx_pkts,
+            "rx_pkts": rx_pkts,
             "tx_retries": tx_retries,
             "tx_failed": tx_failed,
             "active_time": active_time,
@@ -239,17 +237,36 @@ class MultiAPTelemetryETL:
         }
 
         if not prev:
-            return None  # Nhịp đầu tiên dùng làm mốc Baseline Counter
+            return None
 
-        d_pkts = max(1, tx_pkts - prev["tx_pkts"])
+        d_tx = max(1, tx_pkts - prev["tx_pkts"])
+        d_rx = max(0, rx_pkts - prev["rx_pkts"])
         d_retries = max(0, tx_retries - prev["tx_retries"])
         d_failed = max(0, tx_failed - prev["tx_failed"])
-        d_active = max(1, active_time - prev["active_time"])
-        d_busy = max(0, busy_time - prev["busy_time"])
 
-        retry_rate = float(np.clip(d_retries / (d_pkts + d_retries), 0.0, 1.0))
-        p_c = float(np.clip((d_retries + d_failed * 2.0) / (d_pkts + d_retries + d_failed), 0.0, 1.0))
-        airtime_util = float(np.clip(d_busy / d_active, 0.0, 1.0))
+        # Nếu vừa đổi kênh làm bộ đếm active_time của kênh mới nhỏ hơn kênh cũ
+        if active_time >= prev["active_time"]:
+            d_active = max(1, active_time - prev["active_time"])
+            d_busy = max(0, busy_time - prev["busy_time"])
+        else:
+            d_active = max(1, active_time)
+            d_busy = max(0, busy_time)
+
+        cca_airtime = float(np.clip(d_busy / d_active, 0.0, 1.0))
+
+        # Tính mật độ tải Uplink + Downlink (số gói/giây) để bắt chính xác bão UDP Jammer
+        pps = (d_tx + d_rx) / max(1.0, float(self.poll_interval))
+        traffic_airtime = float(np.clip(pps / 7500.0, 0.0, 0.98))
+        airtime_util = max(cca_airtime, traffic_airtime)
+
+        # Tỷ lệ retry tính đúng trên số gói TX (không chia cho d_rx để tránh bị pha loãng về 0.001)
+        tx_retry_ratio = float(np.clip(d_retries / (d_tx + d_retries), 0.0, 1.0)) if d_tx > 20 else 0.0
+        tx_fail_ratio = float(np.clip((d_retries + d_failed * 2.0) / (d_tx + d_retries + d_failed), 0.0, 1.0)) if d_tx > 20 else 0.0
+
+        # Khi có bão UDP (pps > 2500 gói/s hoặc airtime > 65%), phản ánh trực tiếp vào p_c và retry_rate
+        congestion_pc = float(np.clip((airtime_util - 0.45) * 1.4, 0.0, 0.95)) if (sta_count > 0 and airtime_util > 0.50) else 0.0
+        p_c = float(np.clip(max(tx_fail_ratio, congestion_pc), 0.0, 1.0))
+        retry_rate = float(np.clip(max(tx_retry_ratio, p_c * 0.75), 0.0, 1.0))
 
         return {
             "avg_rssi": avg_rssi,
@@ -258,11 +275,10 @@ class MultiAPTelemetryETL:
             "airtime_util": airtime_util,
             "sta_count": sta_count,
             "band": band_label,
-            "debug_info": f"[{band_label}] d_pkts:{d_pkts} | d_ret:{d_retries} | d_fail:{d_failed} | CCA:{airtime_util:.2f}"
+            "debug_info": f"[{band_label}] PPS:{pps:.0f} | d_tx:{d_tx} | d_ret:{d_retries} | CCA:{airtime_util:.2f}"
         }
 
     def _poll_openwrt_node_dualband(self, node):
-        """Mở 1 phiên SSH duy nhất vào AP để lấy đồng thời cả 2.4GHz (phy0-ap0) và 5GHz (phy1-ap0)."""
         ip = node["ip"]
         bssid_2g = node.get("bssid_2g")
         bssid_5g = node.get("bssid_5g")
@@ -335,9 +351,6 @@ class MultiAPTelemetryETL:
             self._save_outputs(final_json_data, now)
             time.sleep(self.poll_interval)
 
-    # ==========================================================================
-    # NHÁNH 2: CHẾ ĐỘ SCAPY MONITOR MODE (--mode scapy)
-    # ==========================================================================
     def _parse_mac_frame(self, pkt):
         dot11 = pkt.getlayer(Dot11)
         fc_field = int(dot11.FCfield)
