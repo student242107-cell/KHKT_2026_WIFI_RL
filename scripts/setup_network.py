@@ -124,11 +124,24 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
 
 def provision_master_node(node, gateway_ip):
     zone_type = node.get("zone_type", "classroom")
+    
+    # IP của Laptop Edge Server đang chạy cổng Captive Portal (app.py)
+    EDGE_SERVER_IP = "192.168.2.158"
+
     cmds = [
         "uci set dhcp.lan.ignore='0'",
         "uci set dhcp.lan.start='100'",
         "uci set dhcp.lan.limit='150'",
         "uci set dhcp.lan.leasetime='12h'",
+        
+        # --- CƠ CHẾ TỰ ĐỘNG BẬT POP-UP CAPTIVE PORTAL (DNS HIJACKING) ---
+        "uci -q delete dhcp.@dnsmasq[0].address || true",
+        f"uci add_list dhcp.@dnsmasq[0].address='/captive.apple.com/{EDGE_SERVER_IP}'",
+        f"uci add_list dhcp.@dnsmasq[0].address='/connectivitycheck.gstatic.com/{EDGE_SERVER_IP}'",
+        f"uci add_list dhcp.@dnsmasq[0].address='/clients3.google.com/{EDGE_SERVER_IP}'",
+        f"uci add_list dhcp.@dnsmasq[0].address='/www.msftconnecttest.com/{EDGE_SERVER_IP}'",
+        f"uci add_list dhcp.@dnsmasq[0].address='/ipv6.msftconnecttest.com/{EDGE_SERVER_IP}'",
+        
         "uci commit dhcp",
         "/etc/init.d/dnsmasq enable",
         "/etc/init.d/dnsmasq restart"
