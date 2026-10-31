@@ -21,6 +21,7 @@ TEACHER_SSID = os.getenv("TEACHER_SSID", "School_Teacher")
 TEACHER_PASS = os.getenv("TEACHER_PASSWORD", "TeacherPassword456")
 ONBOARD_SSID = os.getenv("ONBOARD_SSID", "School_Onboarding")
 MOB_DOMAIN = os.getenv("MOBILITY_DOMAIN", "abcd")
+EDGE_SERVER_IP = os.getenv("EDGE_SERVER_IP", "192.168.2.229")
 
 CONFIG_PATH = "configs/network_config.yaml"
 
@@ -81,9 +82,10 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
         "uci set wireless.onboarding_2g=wifi-iface",
         "uci set wireless.onboarding_2g.device='radio0'",
         "uci set wireless.onboarding_2g.mode='ap'",
-        "uci set wireless.onboarding_2g.network='lan'",
+        "uci set wireless.onboarding_2g.network='onboard_net'",
         f"uci set wireless.onboarding_2g.ssid='{ONBOARD_SSID}'",
         "uci set wireless.onboarding_2g.encryption='none'",
+        "uci set wireless.onboarding_2g.isolate='1'",
         f"uci set wireless.onboarding_2g.disabled='{onboard_disabled}'",
 
         # 3. Cấu hình Phần cứng Radio1 (5GHz) & Mạng Học sinh 5GHz
@@ -124,9 +126,6 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
 
 def provision_master_node(node, gateway_ip):
     zone_type = node.get("zone_type", "classroom")
-    
-    # IP của Laptop Edge Server đang chạy cổng Captive Portal (app.py)
-    EDGE_SERVER_IP = "192.168.2.158"
 
     cmds = [
         "uci set dhcp.lan.ignore='0'",
@@ -134,17 +133,97 @@ def provision_master_node(node, gateway_ip):
         "uci set dhcp.lan.limit='150'",
         "uci set dhcp.lan.leasetime='12h'",
         
-        # --- CƠ CHẾ TỰ ĐỘNG BẬT POP-UP CAPTIVE PORTAL (DNS HIJACKING) ---
+        # --- XÓA CẤU HÌNH DNS HIJACKING CŨ (NẾU CÒN SÓT) ---
+        # DNS hijacking ảnh hưởng TẤT CẢ mạng → không dùng nữa
         "uci -q delete dhcp.@dnsmasq[0].address || true",
-        f"uci add_list dhcp.@dnsmasq[0].address='/captive.apple.com/{EDGE_SERVER_IP}'",
-        f"uci add_list dhcp.@dnsmasq[0].address='/connectivitycheck.gstatic.com/{EDGE_SERVER_IP}'",
-        f"uci add_list dhcp.@dnsmasq[0].address='/clients3.google.com/{EDGE_SERVER_IP}'",
-        f"uci add_list dhcp.@dnsmasq[0].address='/www.msftconnecttest.com/{EDGE_SERVER_IP}'",
-        f"uci add_list dhcp.@dnsmasq[0].address='/ipv6.msftconnecttest.com/{EDGE_SERVER_IP}'",
-        
         "uci commit dhcp",
         "/etc/init.d/dnsmasq enable",
-        "/etc/init.d/dnsmasq restart"
+        "/etc/init.d/dnsmasq restart",
+        
+        # --- TẠO NETWORK INTERFACE RIÊNG CHO MẠNG ONBOARDING (ISOLATED) ---
+        # Tạo bridge và interface riêng cho onboarding để cách ly khỏi LAN
+        "uci set network.onboard_net=interface",
+        "uci set network.onboard_net.proto='static'",
+        f"uci set network.onboard_net.ipaddr='192.168.199.1'",
+        "uci set network.onboard_net.netmask='255.255.255.0'",
+        "uci set network.onboard_net.device='br-onboard'",
+        "uci set network.onboard_br=device",
+        "uci set network.onboard_br.type='bridge'",
+        "uci set network.onboard_br.name='br-onboard'",
+        "uci commit network",
+        
+        # Cấp DHCP cho client trên mạng Onboarding (dải 192.168.199.x)
+        "uci set dhcp.onboard_net=dhcp",
+        "uci set dhcp.onboard_net.interface='onboard_net'",
+        "uci set dhcp.onboard_net.start='50'",
+        "uci set dhcp.onboard_net.limit='50'",
+        "uci set dhcp.onboard_net.leasetime='5m'",
+        # DHCP Option 6: Trỏ DNS về chính router (để client query DNS qua router)
+        f"uci add_list dhcp.onboard_net.dhcp_option='6,192.168.199.1'",
+        "uci commit dhcp",
+        
+        # --- FIREWALL ZONE: CÁCH LY MẠNG ONBOARDING ---
+        "uci set firewall.onboard_zone=zone",
+        "uci set firewall.onboard_zone.name='onboard'",
+        "uci set firewall.onboard_zone.input='ACCEPT'",
+        "uci set firewall.onboard_zone.output='ACCEPT'",
+        "uci set firewall.onboard_zone.forward='REJECT'",
+        "uci set firewall.onboard_zone.network='onboard_net'",
+        
+        # Cho phép DHCP từ client Onboarding tới Router
+        "uci set firewall.onboard_dhcp=rule",
+        "uci set firewall.onboard_dhcp.name='Allow-Onboard-DHCP'",
+        "uci set firewall.onboard_dhcp.src='onboard'",
+        "uci set firewall.onboard_dhcp.proto='udp'",
+        "uci set firewall.onboard_dhcp.dest_port='67-68'",
+        "uci set firewall.onboard_dhcp.target='ACCEPT'",
+        
+        # Cho phép HTTP tới Edge Server (Captive Portal)
+        "uci set firewall.onboard_http=rule",
+        "uci set firewall.onboard_http.name='Allow-Onboard-HTTP-to-EdgeServer'",
+        "uci set firewall.onboard_http.src='onboard'",
+        "uci set firewall.onboard_http.dest='lan'",
+        "uci set firewall.onboard_http.proto='tcp'",
+        "uci set firewall.onboard_http.dest_port='80'",
+        f"uci set firewall.onboard_http.dest_ip='{EDGE_SERVER_IP}'",
+        "uci set firewall.onboard_http.target='ACCEPT'",
+        
+        # Forwarding: onboard -> lan (chỉ HTTP đã được rule ở trên cho phép)
+        "uci set firewall.onboard_to_lan=forwarding",
+        "uci set firewall.onboard_to_lan.src='onboard'",
+        "uci set firewall.onboard_to_lan.dest='lan'",
+        "uci set firewall.@zone[0].masq='1'",
+        
+        # --- DNS HIJACKING CHỈ DÀNH RIÊNG CHO MẠNG ONBOARD (Cổng 53 -> 5353) ---
+        # Tuyệt đối không ảnh hưởng tới KHKT_Testbed 5GHz/2.4GHz
+        "uci set firewall.onboard_dns_hijack=redirect",
+        "uci set firewall.onboard_dns_hijack.name='Hijack-DNS-Onboard-Only'",
+        "uci set firewall.onboard_dns_hijack.src='onboard'",
+        "uci set firewall.onboard_dns_hijack.proto='udp tcp'",
+        "uci set firewall.onboard_dns_hijack.src_dport='53'",
+        "uci set firewall.onboard_dns_hijack.dest_port='5353'",
+        "uci set firewall.onboard_dns_hijack.target='DNAT'",
+        
+        # --- CAPTIVE PORTAL REDIRECT (DNAT) - CHỈ ÁP DỤNG CHO MẠNG ONBOARDING ---
+        "uci set firewall.captive_redirect=redirect",
+        "uci set firewall.captive_redirect.name='Captive-Portal-Redirect'",
+        "uci set firewall.captive_redirect.src='onboard'",
+        "uci set firewall.captive_redirect.src_dport='80'",
+        "uci set firewall.captive_redirect.proto='tcp'",
+        f"uci set firewall.captive_redirect.dest_ip='{EDGE_SERVER_IP}'",
+        "uci set firewall.captive_redirect.dest_port='80'",
+        "uci set firewall.captive_redirect.dest='lan'",
+        "uci set firewall.captive_redirect.target='DNAT'",
+        
+        "uci commit firewall",
+        "/etc/init.d/firewall enable",
+        "/etc/init.d/firewall restart",
+
+        # --- KHỞI ĐỘNG BỘ PHÂN GIẢI DNS CÔ LẬP CHO ONBOARD (PORT 5353) & LƯU VÀO RC.LOCAL ---
+        "sed -i '/5353/d' /etc/rc.local",
+        "sed -i 's|^exit 0|killall -9 dnsmasq_onboard 2>/dev/null; /usr/sbin/dnsmasq --port=5353 --listen-address=192.168.199.1 --bind-interfaces --address=/#/192.168.199.1 --no-resolv --no-hosts\\nexit 0|' /etc/rc.local",
+        "killall -9 dnsmasq_onboard 2>/dev/null || true",
+        "pgrep -f 'dnsmasq.*5353' || /usr/sbin/dnsmasq --port=5353 --listen-address=192.168.199.1 --bind-interfaces --address=/#/192.168.199.1 --no-resolv --no-hosts",
     ] + build_wireless_commands(node.get("ssid_suffix", ""), zone_type) + ["wifi reload"]
 
     run_ssh_script(node["ip"], cmds, f"[MASTER - {zone_type.upper()}] {node['name']}")

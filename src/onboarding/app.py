@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, redirect, make_response
 import json
 import os
 import re
@@ -148,7 +148,9 @@ def get_client_mac(ip):
     try:
         cmd = (
             f"awk '$1==\"{ip}\" && $4!=\"00:00:00:00:00:00\" {{print toupper($4)}}' /proc/net/arp; "
-            f"awk '$3==\"{ip}\" {{print toupper($2)}}' /tmp/dhcp.leases"
+            f"awk '$3==\"{ip}\" {{print toupper($2)}}' /tmp/dhcp.leases; "
+            "iw dev phy0-ap1 station dump 2>/dev/null | awk '/^Station/{print toupper($2)}'; "
+            "awk '$3 ~ /^192\\.168\\.199\\./ {print toupper($2)}' /tmp/dhcp.leases | tail -n 1"
         )
         out = actuators._exec_ssh_output(ROUTER_IP, ROUTER_USER, ROUTER_PASS, cmd)
         for line in out.splitlines():
@@ -191,6 +193,44 @@ def activate_teacher_ssid_and_kick(mac_address):
         print(f"[+] Hoàn tất mở mạng '{TEACHER_SSID}' và chuyển giao thiết bị {mac_address}!")
     except Exception as e:
         print(f"[-] Lỗi trong quá trình kích hoạt mạng Teacher: {e}")
+
+
+# =====================================================================================
+# CÁC ENDPOINT CAPTIVE PORTAL DETECTION (PHẢI ĐẶT TRƯỚC ROUTE CATCH-ALL)
+# Khi thiết bị kết nối Wi-Fi, OS gửi HTTP GET tới URL kiểm tra.
+# Nếu response khác kỳ vọng → OS hiểu có Captive Portal → mở trình duyệt popup mini.
+# Ta trả về HTTP 302 Redirect để popup mở ra đúng trang đăng nhập.
+# =====================================================================================
+
+# --- Android (Google) Connectivity Check ---
+# Android kỳ vọng: HTTP 204 No Content. Ta trả 302 → trigger popup.
+@app.route('/generate_204')
+@app.route('/gen_204')
+def android_captive():
+    return redirect('http://' + request.host + '/', code=302)
+
+# --- Apple iOS/macOS Captive Network Assistant (CNA) ---
+# Apple kỳ vọng: body chứa "<HTML><HEAD><TITLE>Success</TITLE>..."
+# Ta trả redirect → CNA mở popup mini hiển thị form login.
+@app.route('/hotspot-detect.html')
+@app.route('/library/test/success.html')
+def apple_captive():
+    return redirect('http://' + request.host + '/', code=302)
+
+# --- Microsoft Windows NCSI (Network Connectivity Status Indicator) ---
+# Windows kỳ vọng: body = "Microsoft Connect Test". Ta trả redirect → popup mở.
+@app.route('/connecttest.txt')
+@app.route('/ncsi.txt')
+@app.route('/redirect')
+def windows_captive():
+    return redirect('http://' + request.host + '/', code=302)
+
+# --- Firefox Captive Portal Detection ---
+# Firefox kỳ vọng: HTTP 200 với body "success\n". Ta trả redirect → popup.
+@app.route('/canonical.html')
+@app.route('/success.txt')
+def firefox_captive():
+    return redirect('http://' + request.host + '/', code=302)
 
 
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST'])
