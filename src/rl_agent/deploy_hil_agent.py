@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from stable_baselines3 import PPO
 
 from src.modules import wifi_actuators as actuators
+from src.modules import qoe_recorder
 from src.envs.digital_twin_env import UltimateDigitalTwinEnv
 from src.utils.logger import AILogger
 
@@ -147,6 +148,11 @@ def main():
     except Exception as e:
         logging.critical(f"[X] Không tìm thấy file trọng số hoặc lỗi khởi tạo Env: {e}")
         return
+
+    # Khởi động QoE Recorder — ghi latency + packet loss liên tục khi Agent hoạt động
+    gateway_ip = list(AP_MAP.values())[0] if AP_MAP else "192.168.2.1"
+    qoe_recorder.start(gateway_ip=gateway_ip, interval=args.interval, ping_count=10)
+    logging.info(f"[QoE] 📊 Recorder đang ghi dữ liệu → Xem biểu đồ: python visualize_qoe.py")
 
     while True:
         try:
