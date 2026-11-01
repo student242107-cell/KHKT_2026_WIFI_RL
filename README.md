@@ -3,7 +3,7 @@
 
 ---
 
-## 1. TỔNG QUAN HỆ THỐNG CẤP ĐIỀU HÀNH VÀ MÔ HÌNH TỐI ƯU HÓA \(M \gg N\)
+## 1. TỔNG QUAN HỆ THỐNG CẤP ĐIỀU HÀNH VÀ MÔ HÌNH TỐI ƯU HÓA $M \gg N$
 
 ### Bối cảnh và tầm quan trọng chiến lược
 
@@ -31,20 +31,20 @@ Dự án **Cognitive Wi-Fi dành cho KHKT 2026** hiện thực hóa sự chuyể
 
 Nền tảng kiến trúc của hệ thống nhận thức này được dẫn dắt bởi nguyên tắc vận hành tối cao: **“Thượng Tôn Chất Lượng Người Dùng” (User Quality Supremacy)**. Mọi chỉ số Chất lượng Dịch vụ (QoS) và Chất lượng Trải nghiệm (QoE) thực tế của người dùng là các **ràng buộc vận hành cứng (Hard Constraints)**, tuyệt đối không được phép thỏa hiệp:
 
-- **Độ trễ đuôi (\(\text{Latency}_{99}\)):** $\le 15\,\text{ms}$ (ngưỡng phân vị thứ 99).
-- **Tỷ lệ mất gói (\(\text{PER}\)):** $< 1.0\%$.
-- **Cường độ tín hiệu nhận (\(\text{RSSI}\)):** $\ge -65\,\text{dBm}$.
+- **Độ trễ đuôi ($\text{Latency}_{99}$):** $\le 15\,\text{ms}$ (ngưỡng phân vị thứ 99).
+- **Tỷ lệ mất gói ($\text{PER}$):** $< 1.0\%$.
+- **Cường độ tín hiệu nhận ($\text{RSSI}$):** $\ge -65\,\text{dBm}$.
 - **Tính khả dụng liên tục:** Không bao giờ tắt sóng vô tuyến hoặc ngắt SSID khi đang có người dùng (đặc biệt là giáo viên/VIP) kết nối.
 
 Mọi hành động tối ưu hóa năng lượng (Green AI) hay thu hồi tài nguyên phổ tần chỉ được phép diễn ra trong **miền khả thi hợp lệ** khi các ràng buộc QoE trên đã được thỏa mãn tuyệt đối.
 
 ---
 
-### Chứng minh toán học về ưu thế của hệ thống \((M \gg N)\)
+### Chứng minh toán học về ưu thế của hệ thống ($M \gg N$)
 
-Để chứng minh tính vượt trội một cách định lượng của hệ sinh thái nhận thức ($M$) so với mô hình tĩnh ($N$), hệ thống thiết lập hai mô hình toán học bổ trợ: **Chỉ số Hiệu quả Nhân (\(\text{Index}_{VN}\))** và **Hàm Tiện ích Tuyến tính Tổng hợp (\(U(X)\))**.
+Để chứng minh tính vượt trội một cách định lượng của hệ sinh thái nhận thức ($M$) so với mô hình tĩnh ($N$), hệ thống thiết lập hai mô hình toán học bổ trợ: **Chỉ số Hiệu quả Nhân ($\text{Index}_{VN}$)** và **Hàm Tiện ích Tuyến tính Tổng hợp ($U(X)$)**.
 
-#### 1. Chỉ số Hiệu quả Nhân (\(\text{Index}_{VN}\))
+#### 1. Chỉ số Hiệu quả Nhân ($\text{Index}_{VN}$)
 
 Chỉ số hiệu năng tổng thể của mạng được định nghĩa qua tỷ số giữa tiện ích chất lượng vận hành và chi phí phần cứng, triển khai:
 
@@ -65,12 +65,12 @@ $$
 \text{Index}_{VN}(M) \gg \text{Index}_{VN}(N)
 $$
 
-#### 2. Hàm Tiện ích Tuyến tính Tổng hợp \(U(X)\) và Động lực Phạt Phi Lồi
+#### 2. Hàm Tiện ích Tuyến tính Tổng hợp $U(X)$ và Động lực Phạt Phi Lồi
 
 Hàm tiện ích hệ thống $U(X)$ đánh giá sự đánh đổi toàn diện giữa các tham số trên cấu hình $X \in \{M, N\}$:
 
 $$
-U(X) = \alpha \cdot \text{Spatial\_Throughput} - \beta \cdot \text{Latency}_{99} - \gamma \cdot \text{CapEx} - \delta \cdot \text{OpEx}
+U(X) = \alpha \cdot \text{Spatial Throughput} - \beta \cdot \text{Latency}_{99} - \gamma \cdot \text{CapEx} - \delta \cdot \text{OpEx}
 $$
 
 Với $\beta \gg \alpha > 0$ (trọng số phạt suy giảm độ trễ lớn hơn nhiều so với thông lượng, phản ánh đúng triết lý Thượng Tôn Trải Nghiệm Người Dùng).
@@ -100,7 +100,7 @@ Khi mật độ người dùng tăng vọt (ví dụ giờ ra chơi), CSMA/CA tr
 |---|---:|---|
 | **Giảm chi phí đầu tư (CapEx)** | $\ge 20\%$ | Phân hạng phần cứng theo Zone (`classroom` vs `privileged_office`), tận dụng phần cứng thương mại MediaTek MT7981B. |
 | **Giảm chi phí vận hành (`OpEx_Setup`)** | $30 - 50\%$ | Quét cấu trúc mạng tự động (`auto_discover_aps.py`), thiết lập tự động hóa Zero-Touch (`setup_network.py`). |
-| **Cải thiện Tiện ích & Chất lượng (\(U(X)\))** | $\ge 60\%$ | Học tăng cường PPO vòng kín + AQL/FQ-CoDel + Tỉa SSID động + Chuyển vùng nhanh 802.11r. |
+| **Cải thiện Tiện ích & Chất lượng ($U(X)$)** | $\ge 60\%$ | Học tăng cường PPO vòng kín + AQL/FQ-CoDel + Tỉa SSID động + Chuyển vùng nhanh 802.11r. |
 
 ---
 
@@ -226,7 +226,7 @@ done
 tc qdisc replace dev br-lan root fq_codel limit 2048 target 5ms interval 50ms ecn
 ```
 
-- **AQL Thích ứng Băng thông:** Với băng thông $20\,\text{MHz}$ (`HE20`), $aql\_limit = 2000\,\mu\text{s}$; với băng thông $40/80\,\text{MHz}$ (`HE40/HE80`), $aql\_limit = 3500\,\mu\text{s}$. AQL kiểm soát hàng đợi dựa trên **thời gian phát sóng dự kiến (airtime)** thay vì số lượng byte hay số lượng gói tin.
+- **AQL Thích ứng Băng thông:** Với băng thông $20\,\text{MHz}$ (`HE20`), `aql_limit = 2000` $\mu\text{s}$; với băng thông $40/80\,\text{MHz}$ (`HE40/HE80`), `aql_limit = 3500` $\mu\text{s}$. AQL kiểm soát hàng đợi dựa trên **thời gian phát sóng dự kiến (airtime)** thay vì số lượng byte hay số lượng gói tin.
 - **Airtime Fairness:** FQ-CoDel chia lưu lượng thành hàng trăm luồng công bằng, ưu tiên truyền ngay lập tức các gói tin nhỏ nhạy cảm với độ trễ (VoIP, DNS, TCP ACK) và chủ động đánh dấu ECN/thả gói sớm nếu hàng đợi bắt đầu tích tụ trễ quá $5\,\text{ms}$. Kết quả: Độ trễ đuôi được khống chế nghiêm ngặt $\le 15\,\text{ms}$ ngay cả khi kênh truyền chịu tải $100\%$.
 
 ---
@@ -314,12 +314,12 @@ Hệ thống mô hình hóa bài toán điều phối tài nguyên không dây t
 
 ---
 
-### 1. Không gian Trạng thái (\(\mathcal{S} \in \text{Box}(8)\))
+### 1. Không gian Trạng thái ($\mathcal{S} \in \text{Box}(8)$)
 
 Được chuẩn hóa chính xác trong [`src/envs/real_router_env.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/envs/real_router_env.py#L36-L39) và [`src/rl_agent/deploy_hil_agent.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/rl_agent/deploy_hil_agent.py#L79-L94), bao gồm **8 tham số thực tế**:
 
 $$
-\mathcal{S}_t = \Big[ \text{avg\_rssi},\ p_c,\ \text{retry\_rate},\ \text{airtime\_util},\ \text{sta\_count},\ \text{hour},\ \text{minute},\ \text{is\_break\_time} \Big]
+\mathcal{S}_t = \Big[ \text{RSSI}_{\text{avg}},\ p_c,\ \text{RetryRate},\ \text{AirtimeUtil},\ \text{STACount},\ \text{Hour},\ \text{Minute},\ \text{IsBreakTime} \Big]
 $$
 
 | STT | Tên tham số | Khoảng giới hạn `[Min, Max]` | Ý nghĩa vật lý |
@@ -335,7 +335,7 @@ $$
 
 ---
 
-### 2. Không gian Hành động (\(\mathcal{A} \in \text{MultiDiscrete}\))
+### 2. Không gian Hành động ($\mathcal{A} \in \text{MultiDiscrete}$)
 
 Mô hình xuất ra vector hành động gồm 7 thành phần:
 $$\mathcal{A} = \text{MultiDiscrete}([3,\, 3,\, 7,\, 12,\, 2,\, 5,\, 2])$$
@@ -363,12 +363,12 @@ $$\mathcal{A} = \text{MultiDiscrete}([3,\, 3,\, 7,\, 12,\, 2,\, 5,\, 2])$$
 Hàm thưởng được đồng bộ chính xác giữa Bản sao số ([`src/envs/digital_twin_env.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/envs/digital_twin_env.py#L73-L88)) và Phần cứng thực ([`src/envs/real_router_env.py`]):
 
 $$
-R_t = \frac{\text{Throughput}}{100.0} - 5.0 \cdot (p_c)^2 + \text{Bonus}_{\text{Beacon}} + \text{Penalty}_{\text{Action\_Flapping}} - \text{Penalty}_{\text{FailSafe}}
+R_t = \frac{\text{Throughput}}{100.0} - 5.0 \cdot (p_c)^2 + \text{Bonus}_{\text{Beacon}} + \text{Penalty}_{\text{ActionFlapping}} - \text{Penalty}_{\text{FailSafe}}
 $$
 
 - **Hình phạt va chạm bậc hai ($-5.0 \cdot p_c^2$):** Khi $p_c$ nhỏ, phạt nhẹ để AI tập trung tăng thông lượng; nhưng khi $p_c > 0.3$, độ dốc gradient tăng vọt, ép AI phải đổi kênh hoặc co băng thông ngay lập tức.
 - **Thưởng thích ứng Beacon ($\text{Bonus}_{\text{Beacon}} = +0.10$):** Khuyến khích chọn Beacon $80\,\text{ms}$ trong giờ giải lao và $300\,\text{ms}$ trong giờ học.
-- **Phạt rung giật hành động ($\text{Penalty}_{\text{Action\_Flapping}}$):** Phạt $-0.5$ nếu đổi kênh liên tục và $-0.3$ nếu đổi băng thông liên tục, giữ mạng ổn định, tránh `wifi reload` làm rớt kết nối người dùng.
+- **Phạt rung giật hành động ($\text{Penalty}_{\text{ActionFlapping}}$):** Phạt $-0.5$ nếu đổi kênh liên tục và $-0.3$ nếu đổi băng thông liên tục, giữ mạng ổn định, tránh `wifi reload` làm rớt kết nối người dùng.
 
 ---
 
