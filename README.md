@@ -8,6 +8,7 @@
 ### Bối cảnh và tầm quan trọng chiến lược
 
 Sự bùng nổ theo cấp số nhân của lưu lượng di động và mật độ tập trung cao của các thiết bị đầu cuối đã phơi bày những điểm nghẽn căn bản của các mô hình triển khai Wi-Fi tĩnh truyền thống ($N$). Trong môi trường vận hành mật độ cao — chẳng hạn như trường học, hội trường lớn, khu văn phòng và giảng đường — việc gán kênh tĩnh, cố định mức công suất phát và dựa vào cơ chế tranh chấp kênh phân tán (CSMA/CA) thiếu phối hợp dẫn đến:
+
 - Nhiễu đồng kênh (CCI - Co-Channel Interference) và nhiễu kênh lân cận (ACI) trầm trọng.
 - Va chạm khung dữ liệu ở tầng MAC gia tăng đột biến, tỷ lệ truyền lại (Retry Rate) tăng vọt.
 - Hiện tượng **Bufferbloat** (phình bộ đệm) làm bùng phát độ trễ đuôi (Tail Latency), gây đóng băng đường truyền và rớt gói diện rộng.
