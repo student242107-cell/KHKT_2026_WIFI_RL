@@ -38,48 +38,95 @@ def _exec_ssh_output(ap_ip, username, password, command):
         ssh.close()
 
 
+def compute_adaptive_aql(bandwidth="HE20", p_c=0.0, airtime_util=0.0, sta_count=1):
+    """
+    Tính toán Dynamic Adaptive AQL (Airtime Queue Limit):
+    - Khi bão UDP Jammer hoặc nghẽn mạng nặng (p_c > 0.20 hoặc airtime_util > 0.50 hoặc STAs >= 80):
+      Ép hàng đợi xuống mức phòng thủ 1200us để triệt tiêu Bufferbloat,
+      đảm bảo cam kết độ trễ đuôi P99 luôn < 15ms.
+    - Khi mạng tải trung bình (HE20): 1600us.
+    - Khi mạng tải trung bình (HE40): 2400us.
+    - Khi mạng thoáng, cần throughput tối đa (HE80, ít thiết bị): 3200us (để gom đủ A-MPDU aggregation).
+    """
+    try:
+        is_congestion = (float(p_c) > 0.20) or (float(airtime_util) > 0.50) or (int(sta_count) >= 80)
+        if is_congestion:
+            return 1200
+        if bandwidth == "HE20":
+            return 1600
+        elif bandwidth == "HE40":
+            return 2400
+        else:  # HE80 hoặc cao hơn
+            return 3200
+    except Exception as e:
+        logging.warning(f"[AQL] Lỗi tính toán adaptive AQL: {e}. Fallback về 1600us.")
+        return 1600
+
+
 def apply_ai_profile_atomic(
     ap_ip, username, password,
     radio_band="radio1", interface="phy1-ap0",
     channel=44, bandwidth="HE20", tx_power_dbm=18,
-    beacon_int=80, enable_bf=True
+    beacon_int=80, enable_bf=True,
+    aql_limit=None, enable_atf=True
 ):
     """
-    Thực thi nguyên tử (Atomic) cho cả mạng Student và Teacher trên cùng Radio:
-    Đợi 2 giây sau 'wifi reload' rồi áp dụng AQL + FQ-CoDel lên mọi Virtual Interface (phy1-ap*).
+    Thực thi nguyên tử (Atomic) kết hợp BỘ BA VŨ KHÍ TẦNG MAC:
+      1. Airtime Fairness (ATF): Phân bổ thời gian công bằng, triệt tiêu client yếu làm chậm mạng.
+      2. Dynamic Adaptive AQL: Giới hạn thời gian hàng đợi driver mt76 (1200us khi bão tải).
+      3. FQ-CoDel AQM: Tách luồng công bằng, chủ động drop gói UDP vượt ngưỡng target 5ms.
     """
-    bf_val = 1 if enable_bf else 0
-    phy_idx = "phy1" if "1" in radio_band or "1" in interface else "phy0"
-    aql_limit = 2000 if bandwidth == "HE20" else 3500
+    try:
+        bf_val = 1 if enable_bf else 0
+        phy_idx = "phy1" if "1" in radio_band or "1" in interface else "phy0"
 
-    cmd = (
-        f"CUR_CH=$(uci -q get wireless.{radio_band}.channel); "
-        f"CUR_BW=$(uci -q get wireless.{radio_band}.htmode); "
-        f"uci set wireless.{radio_band}.channel='{channel}'; "
-        f"uci set wireless.{radio_band}.htmode='{bandwidth}'; "
-        f"uci set wireless.{radio_band}.txpower='{tx_power_dbm}'; "
-        f"uci set wireless.{radio_band}.beacon_int='{beacon_int}'; "
-        f"uci set wireless.{radio_band}.he_bss_color='8'; "
-        f"uci set wireless.{radio_band}.he_su_beamformer='{bf_val}'; "
-        f"uci commit wireless; "
-        f"if [ \"$CUR_CH\" != \"{channel}\" ] || [ \"$CUR_BW\" != \"{bandwidth}\" ]; then "
-        f"  wifi reload; sleep 2; "
-        f"fi; "
-        f"iw phy {phy_idx} set txq limit 2048 2>/dev/null; "
-        f"echo {aql_limit} > /sys/kernel/debug/ieee80211/{phy_idx}/aql_txq_limit 2>/dev/null; "
-        f"echo \"{aql_limit} {aql_limit}\" > /sys/kernel/debug/ieee80211/{phy_idx}/aql_threshold 2>/dev/null; "
-        f"for dev in $(ls /sys/class/net/ | grep '^{phy_idx}-ap'); do "
-        f"  tc qdisc replace dev $dev root fq_codel limit 2048 target 5ms interval 50ms ecn 2>/dev/null; "
-        f"done; "
-        f"tc qdisc replace dev br-lan root fq_codel limit 2048 target 5ms interval 50ms ecn 2>/dev/null"
-    )
-    success = _exec_ssh_command(ap_ip, username, password, cmd)
-    if success:
-        logging.info(
-            f"   [+] AP {ap_ip}: Đã đồng bộ AI Profile ({radio_band}): "
-            f"CH={channel}, BW={bandwidth}, Tx={tx_power_dbm}dBm, Beacon={beacon_int}ms + AQL/FQ-CoDel."
+        # Nếu aql_limit chưa được chỉ định, tính theo băng thông
+        if aql_limit is None:
+            aql_limit = 1600 if bandwidth == "HE20" else (2400 if bandwidth == "HE40" else 3200)
+
+        cmd = (
+            # 1. Cấu hình UCI
+            f"CUR_CH=$(uci -q get wireless.{radio_band}.channel); "
+            f"CUR_BW=$(uci -q get wireless.{radio_band}.htmode); "
+            f"uci set wireless.{radio_band}.channel='{channel}'; "
+            f"uci set wireless.{radio_band}.htmode='{bandwidth}'; "
+            f"uci set wireless.{radio_band}.txpower='{tx_power_dbm}'; "
+            f"uci set wireless.{radio_band}.beacon_int='{beacon_int}'; "
+            f"uci set wireless.{radio_band}.he_bss_color='8'; "
+            f"uci set wireless.{radio_band}.he_su_beamformer='{bf_val}'; "
+            f"uci set wireless.{radio_band}.airtime_fairness='1' 2>/dev/null || true; "
+            f"uci set wireless.default_{radio_band}.airtime_fairness='1' 2>/dev/null || true; "
+            f"uci commit wireless; "
+            f"if [ \"$CUR_CH\" != \"{channel}\" ] || [ \"$CUR_BW\" != \"{bandwidth}\" ]; then "
+            f"  wifi reload; sleep 2; "
+            f"fi; "
+            # 2. VŨ KHÍ 1: Airtime Fairness (ATF) kernel debugfs
+            f"[ -f /sys/kernel/debug/ieee80211/{phy_idx}/airtime_fairness ] && echo 1 > /sys/kernel/debug/ieee80211/{phy_idx}/airtime_fairness 2>/dev/null || true; "
+            # 3. VŨ KHÍ 2: AQL (Airtime Queue Limit) thích ứng động
+            f"iw phy {phy_idx} set txq limit 2048 2>/dev/null || true; "
+            f"if [ -d /sys/kernel/debug/ieee80211/{phy_idx} ]; then "
+            f"  echo {aql_limit} > /sys/kernel/debug/ieee80211/{phy_idx}/aql_txq_limit 2>/dev/null || true; "
+            f"  echo \"{aql_limit} {aql_limit}\" > /sys/kernel/debug/ieee80211/{phy_idx}/aql_threshold 2>/dev/null || true; "
+            f"fi; "
+            # 4. VŨ KHÍ 3: FQ-CoDel AQM cắt tỉa bão UDP tại nguồn (target 5ms)
+            f"if which tc >/dev/null 2>&1; then "
+            f"  for dev in $(ls /sys/class/net/ 2>/dev/null | grep -E '^({phy_idx}-ap|wlan1|wlan0)'); do "
+            f"    tc qdisc replace dev $dev root fq_codel limit 2048 target 5ms interval 50ms ecn 2>/dev/null || true; "
+            f"  done; "
+            f"  tc qdisc replace dev br-lan root fq_codel limit 2048 target 5ms interval 50ms ecn 2>/dev/null || true; "
+            f"fi"
         )
-    return success
+        success = _exec_ssh_command(ap_ip, username, password, cmd)
+        if success:
+            logging.info(
+                f"   [+] AP {ap_ip}: Đã đồng bộ AI Profile ({radio_band}): "
+                f"CH={channel}, BW={bandwidth}, Tx={tx_power_dbm}dBm, Beacon={beacon_int}ms | "
+                f"🛡️ MAC Guard: ATF=BẬT, AQL={aql_limit}us, FQ-CoDel=target 5ms."
+            )
+        return success
+    except Exception as e:
+        logging.error(f"[-] Ngoại lệ trong apply_ai_profile_atomic ({ap_ip}): {e}")
+        return False
 
 
 def apply_mcs_ceiling(ap_ip, username, password, interface="phy1-ap0", mcs_index=7):

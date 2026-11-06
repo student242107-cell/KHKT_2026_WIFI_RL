@@ -77,6 +77,8 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
         f"uci set wireless.default_radio0.encryption='{WIFI_ENC}'",
         f"uci set wireless.default_radio0.key='{WIFI_PASS}'",
         f"uci set wireless.default_radio0.disabled='{student_disabled}'",
+        "uci set wireless.radio0.airtime_fairness='1'",
+        "uci set wireless.default_radio0.airtime_fairness='1'",
 
         # 2. Tạo Virtual AP 'onboarding_2g' trên Radio0 (Mạng Mở cho Giáo viên đăng ký MAC lần đầu)
         "uci set wireless.onboarding_2g=wifi-iface",
@@ -105,6 +107,8 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
         "uci set wireless.default_radio1.ft_over_ds='0'",
         "uci set wireless.default_radio1.ft_psk_generate_local='1'",
         f"uci set wireless.default_radio1.disabled='{student_disabled}'",
+        "uci set wireless.radio1.airtime_fairness='1'",
+        "uci set wireless.default_radio1.airtime_fairness='1'",
 
         # 4. Tạo Virtual AP 'teacher_5g' trên Radio1 (Mạng Ưu tiên Giáo viên - Dynamic SSID Pruning)
         "uci set wireless.teacher_5g=wifi-iface",
@@ -119,6 +123,7 @@ def build_wireless_commands(ssid_suffix="", zone_type="classroom"):
         "uci set wireless.teacher_5g.ft_over_ds='0'",
         "uci set wireless.teacher_5g.ft_psk_generate_local='1'",
         f"uci set wireless.teacher_5g.disabled='{teacher_disabled}'",
+        "uci set wireless.teacher_5g.airtime_fairness='1'",
 
         "uci commit wireless"
     ]

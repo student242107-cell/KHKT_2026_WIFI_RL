@@ -108,36 +108,53 @@ def get_per_ap_states():
 
 
 def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected_reward):
-    ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
+    try:
+        ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
 
-    target_channel = CHANNELS[ch_idx]
-    target_bw = BANDWIDTHS[bw_idx]
-    target_tx = 16 + (tx_idx % 5)  # Đảm bảo công suất phát mạnh mẽ 16..20 dBm
-    target_mcs = mcs_idx
-    target_beacon = BEACON_INTS[beacon_idx]
-    target_beamform = True if beamform_idx == 1 else False
+        target_channel = CHANNELS[ch_idx]
+        target_bw = BANDWIDTHS[bw_idx]
+        target_tx = 16 + (tx_idx % 5)  # Đảm bảo công suất phát mạnh mẽ 16..20 dBm
+        target_mcs = mcs_idx
+        target_beacon = BEACON_INTS[beacon_idx]
+        target_beamform = True if beamform_idx == 1 else False
 
-    logging.info(
-        f"👉 Kê đơn cho AP {target_ip} ({TARGET_RADIO}/{TARGET_IFACE}): "
-        f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS={target_mcs}, Beacon={target_beacon}ms"
-    )
+        # Tính toán Dynamic Adaptive AQL dựa trên tải thực tế tầng MAC
+        sta_cnt = int(state_arr[2]) if len(state_arr) > 2 else 1
+        p_c_val = float(state_arr[4]) if len(state_arr) > 4 else 0.0
+        airtime_val = float(state_arr[5]) if len(state_arr) > 5 else 0.0
+        adaptive_aql = actuators.compute_adaptive_aql(
+            bandwidth=target_bw,
+            p_c=p_c_val,
+            airtime_util=airtime_val,
+            sta_count=sta_cnt
+        )
 
-    success = actuators.apply_ai_profile_atomic(
-        ap_ip=target_ip,
-        username=USER,
-        password=PWD,
-        radio_band=TARGET_RADIO,
-        interface=TARGET_IFACE,
-        channel=target_channel,
-        bandwidth=target_bw,
-        tx_power_dbm=target_tx,
-        beacon_int=target_beacon,
-        enable_bf=target_beamform
-    )
-    actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
+        logging.info(
+            f"👉 Kê đơn cho AP {target_ip} ({TARGET_RADIO}/{TARGET_IFACE}): "
+            f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS={target_mcs}, "
+            f"Beacon={target_beacon}ms | 🛡️ Dynamic AQL={adaptive_aql}us"
+        )
 
-    status = "Executed" if success else "Failed"
-    ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
+        success = actuators.apply_ai_profile_atomic(
+            ap_ip=target_ip,
+            username=USER,
+            password=PWD,
+            radio_band=TARGET_RADIO,
+            interface=TARGET_IFACE,
+            channel=target_channel,
+            bandwidth=target_bw,
+            tx_power_dbm=target_tx,
+            beacon_int=target_beacon,
+            enable_bf=target_beamform,
+            aql_limit=adaptive_aql,
+            enable_atf=True
+        )
+        actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
+
+        status = "Executed" if success else "Failed"
+        ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
+    except Exception as e:
+        logging.error(f"[-] Ngoại lệ trong execute_ai_action_for_ap cho AP {target_ip}: {e}")
 
 
 def main():
