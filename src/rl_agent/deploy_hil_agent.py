@@ -77,20 +77,28 @@ def get_per_ap_states():
         states = {}
         for bssid, data in json_data.items():
             if bssid.upper() in AP_MAP:
+                noise_val = data.get("noise_floor", data.get("phy_sensing", {}).get("noise_floor_dbm", -95.0))
+                if noise_val is None:
+                    noise_val = -95.0
+                ofdma_val = data.get("ofdma_ratio", data.get("phy_sensing", {}).get("ofdma_ratio", 0.5))
+                if ofdma_val is None:
+                    ofdma_val = 0.5
+
+                # Vector trạng thái 8 chiều Cross-Layer (PHY + MAC + Context)
                 state_array = np.array([
-                    data["avg_rssi"],
-                    data["p_c"],
-                    data["retry_rate"],
-                    data["airtime_util"],
-                    data["sta_count"],
-                    data["hour"],
-                    data["minute"],
-                    data["is_break_time"]
+                    float(data["avg_rssi"]),
+                    float(noise_val),
+                    float(data["sta_count"]),
+                    float(data["retry_rate"]),
+                    float(data["p_c"]),
+                    float(data["airtime_util"]),
+                    float(ofdma_val),
+                    float(data.get("is_break_time", 0))
                 ], dtype=np.float32)
                 state_array = np.clip(
                     state_array,
-                    a_min=[-90.0, 0.0, 0.0, 0.0, 0, 0, 0, 0],
-                    a_max=[-30.0, 1.0, 1.0, 1.0, 300, 23, 59, 1]
+                    a_min=[-90.0, -105.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    a_max=[-30.0, -50.0, 300.0, 1.0, 1.0, 1.0, 1.0, 1.0]
                 )
                 states[bssid.upper()] = state_array
         return states
@@ -161,25 +169,36 @@ def main():
 
             for bssid, state in per_ap_states.items():
                 target_ip = AP_MAP[bssid]
-                sta_cnt = int(state[4])
-                p_c_val = float(state[1])
-                airtime_val = float(state[3])
+                rssi_val = float(state[0])
+                noise_val = float(state[1])
+                sta_cnt = int(state[2])
+                retry_val = float(state[3])
+                p_c_val = float(state[4])
+                airtime_val = float(state[5])
+                ofdma_val = float(state[6])
 
                 logging.info(
                     f"📊 Khám AP {target_ip} [{bssid}] "
-                    f"(STAs={sta_cnt}, RSSI={state[0]:.1f}dBm, p_c={p_c_val:.3f}, Airtime={airtime_val:.2%})"
+                    f"(STAs={sta_cnt}, RSSI={rssi_val:.1f}dBm, Noise={noise_val:.1f}dBm, "
+                    f"p_c={p_c_val:.3f}, Airtime={airtime_val:.2%}, OFDMA={ofdma_val:.1%})"
                 )
 
                 action, _ = model.predict(state, deterministic=True)
                 action = np.array(action, dtype=int)
 
-                # 1. Điều phối Băng thông theo tải thực tế của từng AP:
+                # 1. Điều phối Băng thông theo tải thực tế & nhiễu môi trường:
                 # Nếu AP đang chịu bão tải (p_c > 0.25 hoặc Airtime > 55% và có >= 2 STAs) -> Bóp về HE20 (idx 0)
                 # Ngược lại nếu AP rảnh hoặc chỉ có 0-1 STA -> Mở rộng HE40/HE80 để tối đa hóa tốc độ!
                 if sta_cnt >= 2 and (p_c_val > 0.25 or airtime_val > 0.55):
                     action[1] = 0  # HE20 chống nghẽn
                 elif sta_cnt <= 1:
                     action[1] = 2  # HE80 cho AP ít thiết bị
+
+                # 2. Bộ điều phối Kênh Đa Trạm kết hợp PHY Noise Floor:
+                # Nếu Noise Floor cao bất thường (> -78dBm) do ô nhiễm RF -> Ưu tiên rời kênh 36
+                if noise_val > -78.0 and action[0] == 0:
+                    action[0] = 1 if 1 not in occupied_channels else 2
+                    logging.info(f"   [PHY-Sensing] Phát hiện Noise Floor cao ({noise_val:.1f}dBm) tại {target_ip}. Tự động đổi kênh lánh nạn sang CH={CHANNELS[action[0]]}!")
 
                 # 2. Bộ điều phối Kênh Đa Trạm (Orthogonal Multi-AP Channel Coordinator)
                 ch_idx = int(action[0])

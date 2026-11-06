@@ -211,6 +211,7 @@ class MultiAPTelemetryETL:
 
         # Tách riêng từng khối Survey data của từng kênh để không bị nhảy dòng Regex
         active_time, busy_time = 0, 0
+        noise_floor = -95.0
         survey_blocks = survey_raw.split("Survey data from")
         for blk in survey_blocks:
             if "[in use]" in blk:
@@ -218,6 +219,9 @@ class MultiAPTelemetryETL:
                 bsy_m = re.search(r"channel busy time:\s*(\d+)", blk)
                 rx_m = re.search(r"channel receive time:\s*(\d+)", blk)
                 tx_m = re.search(r"channel transmit time:\s*(\d+)", blk)
+                noise_m = re.search(r"noise:\s*([-\d]+)", blk)
+                if noise_m:
+                    noise_floor = float(noise_m.group(1))
                 if act_m:
                     active_time = int(act_m.group(1))
                     raw_busy = int(bsy_m.group(1)) if bsy_m else 0
@@ -270,12 +274,14 @@ class MultiAPTelemetryETL:
 
         return {
             "avg_rssi": avg_rssi,
+            "noise_floor": noise_floor,
             "p_c": p_c,
             "retry_rate": retry_rate,
             "airtime_util": airtime_util,
             "sta_count": sta_count,
+            "ofdma_ratio": 0.5,
             "band": band_label,
-            "debug_info": f"[{band_label}] PPS:{pps:.0f} | d_tx:{d_tx} | d_ret:{d_retries} | CCA:{airtime_util:.2f}"
+            "debug_info": f"[{band_label}] PPS:{pps:.0f} | d_tx:{d_tx} | d_ret:{d_retries} | CCA:{airtime_util:.2f} | NF:{noise_floor:.0f}dBm"
         }
 
     def _poll_openwrt_node_dualband(self, node):
@@ -607,10 +613,12 @@ class MultiAPTelemetryETL:
 
                     final_json_data[bssid] = {
                         "avg_rssi": avg_rssi,
+                        "noise_floor": round(noise_floor, 1) if noise_floor is not None else -92.0,
                         "p_c": p_c,
                         "retry_rate": blended_retry,
                         "airtime_util": airtime_util,
                         "sta_count": sta_count,
+                        "ofdma_ratio": round(ofdma_ratio, 4),
                         "hour": now.hour,
                         "minute": now.minute,
                         "is_break_time": is_break_time,

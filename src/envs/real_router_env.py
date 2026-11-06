@@ -34,8 +34,8 @@ class RealRouterEnv(gym.Env):
 
         self.action_space = spaces.MultiDiscrete([3, 3, 7, 12, 2, 5, 2])
         self.observation_space = spaces.Box(
-            low=np.array([-90.0, 0.0, 0.0, 0.0, 0, 0, 0, 0], dtype=np.float32),
-            high=np.array([-30.0, 1.0, 1.0, 1.0, 300, 23, 59, 1], dtype=np.float32)
+            low=np.array([-90.0, -105.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([-30.0, -50.0, 300.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         )
         self.current_step = 0
         self.max_steps = 100
@@ -71,14 +71,30 @@ class RealRouterEnv(gym.Env):
                     first_mac = list(json_data.keys())[0]
                     data = json_data[first_mac]
 
+            noise_val = data.get("noise_floor", data.get("phy_sensing", {}).get("noise_floor_dbm", -95.0))
+            if noise_val is None:
+                noise_val = -95.0
+            ofdma_val = data.get("ofdma_ratio", data.get("phy_sensing", {}).get("ofdma_ratio", 0.5))
+            if ofdma_val is None:
+                ofdma_val = 0.5
+
             state_array = np.array([
-                data["avg_rssi"], data["p_c"], data["retry_rate"],
-                data["airtime_util"], data["sta_count"],
-                data["hour"], data["minute"], data["is_break_time"]
+                data["avg_rssi"],
+                noise_val,
+                data["sta_count"],
+                data["retry_rate"],
+                data["p_c"],
+                data["airtime_util"],
+                ofdma_val,
+                data.get("is_break_time", 0)
             ], dtype=np.float32)
-            return np.clip(state_array, [-90.0, 0.0, 0.0, 0.0, 0, 0, 0, 0], [-30.0, 1.0, 1.0, 1.0, 300, 23, 59, 1])
+            return np.clip(
+                state_array,
+                [-90.0, -105.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [-30.0, -50.0, 300.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            )
         except Exception:
-            return np.array([-70.0, 0.1, 0.05, 0.4, 20, 8, 15, 0], dtype=np.float32)
+            return np.array([-70.0, -95.0, 20.0, 0.05, 0.1, 0.4, 0.5, 0.0], dtype=np.float32)
 
     def step(self, action):
         self.current_step += 1
@@ -115,7 +131,7 @@ class RealRouterEnv(gym.Env):
         time.sleep(10)
 
         new_state = self._get_real_state()
-        real_pc = new_state[1]
+        real_pc = new_state[4]  # Index 4 là p_c trong không gian 8 chiều mới
         actual_throughput = 100.0 * (1.0 - real_pc)
 
         norm_throughput = actual_throughput / 100.0

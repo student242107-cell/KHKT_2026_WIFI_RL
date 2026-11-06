@@ -7,7 +7,8 @@ class AILogger:
     def __init__(self, log_path="data/processed/ai_actions_log.csv"):
         self.log_path = log_path
         self.headers = [
-            "Timestamp", "AP_IP", "BSSID", "STA_Count", "RSSI", "p_c", "Airtime_Util",
+            "Timestamp", "AP_IP", "BSSID", "STA_Count", "RSSI", "Noise_Floor",
+            "p_c", "Airtime_Util", "OFDMA_Ratio",
             "CH_Idx", "BW_Idx", "TxPower_Idx", "MCS_Idx", "Beacon_Idx",
             "Expected_Reward", "Status"
         ]
@@ -23,11 +24,13 @@ class AILogger:
     def log_action(self, ap_ip, bssid, state_arr, action_arr, expected_reward, status):
         """Ghi log quyết định. Các Hotspot sẽ được nhóm theo thời gian (Timestamp)."""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sta_count = int(state_arr[4])
         rssi = float(state_arr[0])
-        p_c = float(state_arr[1])
-        airtime = float(state_arr[3])
-        
+        noise = float(state_arr[1])
+        sta_count = int(state_arr[2])
+        p_c = float(state_arr[4])
+        airtime = float(state_arr[5])
+        ofdma = float(state_arr[6])
+
         ch_idx = int(action_arr[0])
         bw_idx = int(action_arr[1])
         tx_idx = int(action_arr[2])
@@ -37,7 +40,8 @@ class AILogger:
         with open(self.log_path, mode="a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                now_str, ap_ip, bssid, sta_count, f"{rssi:.1f}", f"{p_c:.3f}", f"{airtime:.3f}",
+                now_str, ap_ip, bssid, sta_count, f"{rssi:.1f}", f"{noise:.1f}",
+                f"{p_c:.3f}", f"{airtime:.3f}", f"{ofdma:.2f}",
                 ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx,
                 f"{expected_reward:.2f}", status
             ])
