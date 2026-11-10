@@ -10,7 +10,9 @@ from stable_baselines3 import PPO
 
 from src.modules import wifi_actuators as actuators
 from src.modules import qoe_recorder
-from src.envs.digital_twin_env import UltimateDigitalTwinEnv
+from src.envs.digital_twin_env import (
+    UltimateDigitalTwinEnv, TX_POWER_DBM, OBSS_PD_OFFSETS, BEACON_INTS as TWIN_BEACON_INTS
+)
 from src.utils.logger import AILogger
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -58,11 +60,28 @@ else:
     CHANNELS = [1, 6, 11]
     BANDWIDTHS = ["HE20", "HE40", "HE40"]
 
-BEACON_INTS = [80, 300]
+BEACON_INTS = list(TWIN_BEACON_INTS)  # [80, 300] ms — đồng bộ với Digital Twin
 PROCESSED_DATA_PATH = "data/processed/per_ap_state.json"
 
-# Khởi tạo trạng thái mặc định ban đầu của các Router là Kênh 36 (idx 0), HE40 (idx 1)
+# --- HYSTERESIS CHỐNG PING-PONG KHI TRIỂN KHAI THẬT ---
+# Nhóm tham số "cần wifi reload" (kênh, băng thông, beacon, beamforming, OBSS-PD) chỉ được đổi khi:
+#   (1) đề xuất mới ổn định DEBOUNCE_CYCLES chu kỳ liên tiếp, VÀ
+#   (2) đã qua MIN_DWELL_CYCLES chu kỳ kể từ lần reload trước,
+#   trừ khi mạng đang KHẨN CẤP (p_c > 0.6 hoặc Noise Floor > -70 dBm).
+# Nhóm "áp nóng" (Tx Power, MCS ceiling) được áp ngay mỗi chu kỳ, không làm rớt kết nối.
+DEBOUNCE_CYCLES = 2
+MIN_DWELL_CYCLES = 3
+# Kênh vừa bị bỏ vì nhiễu RF sẽ bị "cách ly" để tránh quay lại ngay khi Noise Floor
+# trên kênh MỚI (đã sạch) khiến AI muốn về lại CH36.
+CHANNEL_QUARANTINE_SEC = 1800
+RELOAD_DIMS = (0, 1, 4, 5, 6)
+HOT_DIMS = (2, 3)
+
 previous_actions = {}
+pending_actions = {}       # bssid -> (action, số chu kỳ liên tiếp)
+last_reload_cycle = {}     # bssid -> cycle index
+channel_quarantine = {}    # bssid -> {ch_idx: expiry_ts}
+cycle_counter = 0
 ai_logger = AILogger()
 
 
@@ -109,14 +128,15 @@ def get_per_ap_states():
 
 def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected_reward):
     try:
-        ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = action_array
+        ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_pd_idx, beamform_idx = [int(x) for x in action_array]
 
         target_channel = CHANNELS[ch_idx]
         target_bw = BANDWIDTHS[bw_idx]
-        target_tx = 16 + (tx_idx % 5)  # Đảm bảo công suất phát mạnh mẽ 16..20 dBm
+        target_tx = int(TX_POWER_DBM[min(max(tx_idx, 0), len(TX_POWER_DBM) - 1)])  # 14..20 dBm (đơn điệu)
         target_mcs = mcs_idx
         target_beacon = BEACON_INTS[beacon_idx]
         target_beamform = True if beamform_idx == 1 else False
+        target_obss_offset = OBSS_PD_OFFSETS[min(max(obss_pd_idx, 0), len(OBSS_PD_OFFSETS) - 1)]
 
         # Tính toán Dynamic Adaptive AQL dựa trên tải thực tế tầng MAC
         sta_cnt = int(state_arr[2]) if len(state_arr) > 2 else 1
@@ -131,8 +151,9 @@ def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected
 
         logging.info(
             f"👉 Kê đơn cho AP {target_ip} ({TARGET_RADIO}/{TARGET_IFACE}): "
-            f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS={target_mcs}, "
-            f"Beacon={target_beacon}ms | 🛡️ Dynamic AQL={adaptive_aql}us"
+            f"CH={target_channel}, BW={target_bw}, Tx={target_tx}dBm, MCS≤{target_mcs}, "
+            f"Beacon={target_beacon}ms, OBSS-PD={-82 + target_obss_offset}dBm, "
+            f"BF={'ON' if target_beamform else 'OFF'} | 🛡️ Dynamic AQL={adaptive_aql}us"
         )
 
         success = actuators.apply_ai_profile_atomic(
@@ -147,14 +168,39 @@ def execute_ai_action_for_ap(target_ip, bssid, state_arr, action_array, expected
             beacon_int=target_beacon,
             enable_bf=target_beamform,
             aql_limit=adaptive_aql,
-            enable_atf=True
+            enable_atf=True,
+            obss_pd_offset=target_obss_offset
         )
         actuators.apply_mcs_ceiling(target_ip, USER, PWD, TARGET_IFACE, target_mcs)
 
         status = "Executed" if success else "Failed"
         ai_logger.log_action(target_ip, bssid, state_arr, action_array, expected_reward, status)
+        return success
     except Exception as e:
         logging.error(f"[-] Ngoại lệ trong execute_ai_action_for_ap cho AP {target_ip}: {e}")
+        return False
+
+
+def _is_emergency(state):
+    """Mạng khẩn cấp -> bỏ qua dwell/debounce để phản ứng tức thì."""
+    try:
+        return float(state[4]) > 0.60 or float(state[1]) > -70.0
+    except Exception:
+        return False
+
+
+def _best_allowed_channel(oracle_twin, state, action, forbidden):
+    """Chọn kênh tốt nhất theo Oracle trong số các kênh không bị cách ly / chiếm dụng."""
+    best_ch, best_r = None, -np.inf
+    for c in range(len(CHANNELS)):
+        if c in forbidden:
+            continue
+        cand = action.copy()
+        cand[0] = c
+        r = oracle_twin.simulate_future(state, cand)
+        if r > best_r:
+            best_ch, best_r = c, r
+    return best_ch
 
 
 def main():
@@ -201,56 +247,80 @@ def main():
                 )
 
                 action, _ = model.predict(state, deterministic=True)
-                action = np.array(action, dtype=int)
+                action = np.array(action, dtype=int).reshape(-1)
+                emergency = _is_emergency(state)
+                now_ts = time.time()
 
-                # 1. Điều phối Băng thông theo tải thực tế & nhiễu môi trường:
-                # Nếu AP đang chịu bão tải (p_c > 0.25 hoặc Airtime > 55% và có >= 2 STAs) -> Bóp về HE20 (idx 0)
-                # Ngược lại nếu AP rảnh hoặc chỉ có 0-1 STA -> Mở rộng HE40/HE80 để tối đa hóa tốc độ!
-                if sta_cnt >= 2 and (p_c_val > 0.25 or airtime_val > 0.55):
-                    action[1] = 0  # HE20 chống nghẽn
-                elif sta_cnt <= 1:
-                    action[1] = 2  # HE80 cho AP ít thiết bị
+                # 1. Cách ly kênh vừa bị bỏ vì nhiễu RF (PHY Noise Floor) -> chống ping-pong về CH36
+                quarantine = channel_quarantine.setdefault(bssid, {})
+                for c in [c for c, exp in quarantine.items() if exp < now_ts]:
+                    quarantine.pop(c, None)
+                prev_action = previous_actions.get(bssid)
+                if prev_action is not None and int(action[0]) != int(prev_action[0]) and noise_val > -84.0:
+                    quarantine[int(prev_action[0])] = now_ts + CHANNEL_QUARANTINE_SEC
+                    logging.info(f"   [PHY-Sensing] Cách ly CH={CHANNELS[int(prev_action[0])]} "
+                                 f"trong {CHANNEL_QUARANTINE_SEC // 60} phút (Noise={noise_val:.1f}dBm).")
 
-                # 2. Bộ điều phối Kênh Đa Trạm kết hợp PHY Noise Floor:
-                # Nếu Noise Floor cao bất thường (> -78dBm) do ô nhiễm RF -> Ưu tiên rời kênh 36
-                if noise_val > -78.0 and action[0] == 0:
-                    action[0] = 1 if 1 not in occupied_channels else 2
-                    logging.info(f"   [PHY-Sensing] Phát hiện Noise Floor cao ({noise_val:.1f}dBm) tại {target_ip}. Tự động đổi kênh lánh nạn sang CH={CHANNELS[action[0]]}!")
-
-                # 2. Bộ điều phối Kênh Đa Trạm (Orthogonal Multi-AP Channel Coordinator)
-                ch_idx = int(action[0])
-                if ch_idx in occupied_channels:
-                    available_chs = [i for i in range(len(CHANNELS)) if i not in occupied_channels]
-                    if available_chs:
-                        action[0] = available_chs[0]
-                        logging.info(f"   [Coordinator] Tự động tách Kênh cho {target_ip} sang CH={CHANNELS[action[0]]} để triệt tiêu CCI.")
+                # 2. Bộ điều phối Kênh Đa Trạm (Orthogonal Multi-AP) + tôn trọng kênh bị cách ly
+                forbidden = set(occupied_channels) | set(quarantine.keys())
+                if int(action[0]) in forbidden:
+                    alt = _best_allowed_channel(oracle_twin, state, action, forbidden)
+                    if alt is None:  # hết kênh -> chỉ tránh kênh đang bị AP khác chiếm
+                        alt = _best_allowed_channel(oracle_twin, state, action, set(occupied_channels))
+                    if alt is not None and alt != int(action[0]):
+                        logging.info(f"   [Coordinator] Đổi CH={CHANNELS[int(action[0])]} -> CH={CHANNELS[alt]} "
+                                     f"(tránh CCI / kênh cách ly).")
+                        action[0] = alt
                 occupied_channels.append(int(action[0]))
 
-                prev_action = previous_actions.get(bssid)
-                # Chỉ kích hoạt đổi cấu hình khi thay đổi Kênh (action[0]) hoặc Băng thông (action[1])
-                is_radio_changed = (prev_action is None) or (action[0] != prev_action[0]) or (action[1] != prev_action[1])
+                # 3. Hysteresis cho nhóm tham số cần wifi reload
+                if prev_action is None:
+                    reload_changed, hot_changed = True, True
+                else:
+                    reload_changed = any(int(action[d]) != int(prev_action[d]) for d in RELOAD_DIMS)
+                    hot_changed = any(int(action[d]) != int(prev_action[d]) for d in HOT_DIMS)
 
-                if is_radio_changed:
-                    # So sánh điểm thưởng của Action mới với cấu hình mặc định đang bị nghẽn (CH36=0, HE40=1)
-                    baseline_action = prev_action if prev_action is not None else np.array([0, 1, 2, 7, 0, 2, 1])
-                    oracle_twin.previous_action = None
-                    current_reward = oracle_twin.simulate_future(state, baseline_action)
-                    expected_reward = oracle_twin.simulate_future(state, action)
-                    delta_gain = expected_reward - current_reward
+                if reload_changed and prev_action is not None and not emergency:
+                    key = tuple(int(action[d]) for d in RELOAD_DIMS)
+                    p_key, p_cnt = pending_actions.get(bssid, (None, 0))
+                    p_cnt = p_cnt + 1 if p_key == key else 1
+                    pending_actions[bssid] = (key, p_cnt)
+                    dwell_ok = (cycle_counter - last_reload_cycle.get(bssid, -10**9)) >= MIN_DWELL_CYCLES
+                    if p_cnt < DEBOUNCE_CYCLES or not dwell_ok:
+                        # Chưa đủ ổn định -> giữ nhóm reload cũ, vẫn cho phép áp nóng Tx/MCS
+                        for d in RELOAD_DIMS:
+                            action[d] = prev_action[d]
+                        reload_changed = False
+                        hot_changed = any(int(action[d]) != int(prev_action[d]) for d in HOT_DIMS)
+                        logging.info(f"   [Hysteresis] Chờ xác nhận đề xuất reload ({p_cnt}/{DEBOUNCE_CYCLES}, "
+                                     f"dwell={'OK' if dwell_ok else 'chưa đủ'}).")
 
-                    logging.info(
-                        f"   [Oracle] Điểm cấu hình mới: {expected_reward:.2f} "
-                        f"(So với hiện tại: {delta_gain:+.2f})"
-                    )
+                if not (reload_changed or hot_changed):
+                    continue
 
-                    if expected_reward < -2.5 and delta_gain < 0.0:
-                        logging.warning("   [CẢNH BÁO] Oracle phủ quyết lệnh này! Giữ nguyên cấu hình cũ.")
-                        ai_logger.log_action(target_ip, bssid, state, action, expected_reward, "Vetoed")
-                    else:
-                        logging.info("   ✅ Lệnh tối ưu đã được Oracle phê duyệt. Đang thực thi xuống OpenWrt...")
-                        execute_ai_action_for_ap(target_ip, bssid, state, action, expected_reward)
-                        previous_actions[bssid] = action.copy()
+                # 4. Oracle Guardrail: so sánh với cấu hình hiện tại
+                baseline_action = prev_action if prev_action is not None else np.array([0, 1, 3, 7, 1, 0, 1])
+                current_reward = oracle_twin.simulate_future(state, baseline_action)
+                expected_reward = oracle_twin.simulate_future(state, action)
+                delta_gain = expected_reward - current_reward
+                logging.info(
+                    f"   [Oracle] Điểm cấu hình mới: {expected_reward:.2f} "
+                    f"(So với hiện tại: {delta_gain:+.2f})"
+                )
 
+                if prev_action is not None and expected_reward < -2.5 and delta_gain < 0.0:
+                    logging.warning("   [CẢNH BÁO] Oracle phủ quyết lệnh này! Giữ nguyên cấu hình cũ.")
+                    ai_logger.log_action(target_ip, bssid, state, action, expected_reward, "Vetoed")
+                    continue
+
+                logging.info("   ✅ Lệnh tối ưu đã được Oracle phê duyệt. Đang thực thi xuống OpenWrt...")
+                if execute_ai_action_for_ap(target_ip, bssid, state, action, expected_reward):
+                    previous_actions[bssid] = action.copy()
+                    pending_actions.pop(bssid, None)
+                    if reload_changed:
+                        last_reload_cycle[bssid] = cycle_counter
+
+            cycle_counter += 1
             time.sleep(args.interval)
 
         except KeyboardInterrupt:
