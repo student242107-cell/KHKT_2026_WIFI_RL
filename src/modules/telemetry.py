@@ -272,6 +272,32 @@ class MultiAPTelemetryETL:
         p_c = float(np.clip(max(tx_fail_ratio, congestion_pc), 0.0, 1.0))
         retry_rate = float(np.clip(max(tx_retry_ratio, p_c * 0.75), 0.0, 1.0))
 
+        # --- Bóc tách động OFDMA Ratio từ trạng thái phần cứng mt76 (iw station dump) ---
+        bitrate_lines = re.findall(r"(?:tx|rx)\s+bitrate:\s*([^\n]+)", station_raw)
+        he_lines = [ln for ln in bitrate_lines if ("HE-MCS" in ln or "HE-NSS" in ln)]
+        ru_mu_lines = [
+            ln for ln in he_lines
+            if re.search(r"(\bRU\b|HE-DCM\s+[1-9]|HE-MU)", ln)
+        ]
+        total_rate_lines = len(bitrate_lines)
+
+        if sta_count == 0:
+            he_adoption = 0.0
+            ofdma_ratio = 0.0
+        else:
+            he_adoption = (
+                float(len(he_lines)) / float(total_rate_lines)
+                if total_rate_lines > 0
+                else (0.85 if band_label == "5G" else 0.50)
+            )
+            ru_bonus = (0.15 * float(len(ru_mu_lines)) / float(len(he_lines))) if he_lines else 0.0
+            multi_sta_factor = 0.72 if sta_count == 1 else min(0.92, 0.76 + 0.04 * min(sta_count, 4))
+            base_ofdma = he_adoption * multi_sta_factor + ru_bonus
+            # Khi xảy ra bão UDP / va chạm CSMA/CA hoặc nhiễu RF cao, bộ lập lịch mt76 giảm ghép khung MU-PPDU
+            degradation = float(np.clip(0.55 * p_c + 0.25 * retry_rate + 0.20 * max(0.0, airtime_util - 0.50), 0.0, 0.88))
+            min_ofdma = 0.05 if he_adoption > 0.0 else 0.0
+            ofdma_ratio = round(float(np.clip(base_ofdma * (1.0 - degradation), min_ofdma, 0.95)), 4)
+
         return {
             "avg_rssi": avg_rssi,
             "noise_floor": noise_floor,
@@ -279,9 +305,20 @@ class MultiAPTelemetryETL:
             "retry_rate": retry_rate,
             "airtime_util": airtime_util,
             "sta_count": sta_count,
-            "ofdma_ratio": 0.5,
+            "ofdma_ratio": ofdma_ratio,
             "band": band_label,
-            "debug_info": f"[{band_label}] PPS:{pps:.0f} | d_tx:{d_tx} | d_ret:{d_retries} | CCA:{airtime_util:.2f} | NF:{noise_floor:.0f}dBm"
+            "phy_sensing": {
+                "he_rate_lines": len(he_lines),
+                "ru_mu_lines": len(ru_mu_lines),
+                "total_rate_lines": total_rate_lines,
+                "he_adoption": round(he_adoption, 4),
+                "ofdma_ratio": ofdma_ratio,
+                "noise_floor_dbm": round(noise_floor, 1),
+            },
+            "debug_info": (
+                f"[{band_label}] PPS:{pps:.0f} | d_tx:{d_tx} | d_ret:{d_retries} | "
+                f"CCA:{airtime_util:.2f} | NF:{noise_floor:.0f}dBm | OFDMA:{ofdma_ratio:.1%}"
+            )
         }
 
     def _poll_openwrt_node_dualband(self, node):
@@ -354,8 +391,9 @@ class MultiAPTelemetryETL:
                     print(
                         f"[📊 {metrics['band']:4}] {node.get('name', node['ip']):13} ({bssid}) | "
                         f"STAs: {metrics['sta_count']} | RSSI: {metrics['avg_rssi']:.1f}dBm | "
-                        f"p_c: {metrics['p_c']:.3f} | Retry: {metrics['retry_rate']:.3f} | "
-                        f"Airtime: {metrics['airtime_util']:.2%}"
+                        f"NF: {metrics['noise_floor']:.0f}dBm | p_c: {metrics['p_c']:.3f} | "
+                        f"Retry: {metrics['retry_rate']:.3f} | Airtime: {metrics['airtime_util']:.2%} | "
+                        f"OFDMA: {metrics['ofdma_ratio']:.1%}"
                     )
 
             self._save_outputs(final_json_data, now)
