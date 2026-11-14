@@ -11,7 +11,9 @@ from stable_baselines3 import PPO
 from src.modules import wifi_actuators as actuators
 from src.modules import qoe_recorder
 from src.envs.digital_twin_env import (
-    UltimateDigitalTwinEnv, TX_POWER_DBM, OBSS_PD_OFFSETS, BEACON_INTS as TWIN_BEACON_INTS
+    UltimateDigitalTwinEnv, HardwareAwareWrapper,
+    NormalizedWifiFeaturesExtractor, CrossLayerNormExtractor,
+    TX_POWER_DBM, OBSS_PD_OFFSETS, BEACON_INTS as TWIN_BEACON_INTS
 )
 from src.utils.logger import AILogger
 

@@ -2,8 +2,14 @@
 BẢN SAO SỐ CROSS-LAYER (DIGITAL TWIN) — 8D DUAL-SENSING STATE & 7D ACTION
 =========================================================================
 File này là "nguồn chân lý duy nhất" (single source of truth) cho:
-  * Notebook huấn luyện `notebooks/training_digital_twin.ipynb` (Cell Bước 1, 2, 3, 4.6).
+  * Notebook huấn luyện `notebooks/training_digital_twin.ipynb` (Cell Bước 1, 2, 3, 4.5, 4.6).
   * Oracle What-If Engine trong `src/rl_agent/deploy_hil_agent.py` (`simulate_future`).
+
+Chuỗi nhân quả vật lý 4 tầng (4-Layer Causal Physics Chain):
+  Môi trường RF + Tải + Hành động A_t
+  ---> Phổ kênh Bonding + SINR + PHY Rate + Va chạm CSMA/CA (p_c)
+  ---> Goodput (Bảo toàn lưu lượng) + Hàng đợi AQM/AQL + Trễ P99 + Loss
+  ---> Reward R_t
 
 Không gian trạng thái 8 chiều (Dual Sensing = MAC-layer Sensing + PHY Preamble Sensing):
   [0] avg_rssi      [-90, -30] dBm   (MAC  - station dump)
@@ -24,13 +30,17 @@ Không gian hành động 7 chiều MultiDiscrete([3, 3, 7, 12, 2, 5, 2]):
   [5] obss_pd     : 0..4  -> ngưỡng Spatial Reuse [-82, -77, -72, -67, -62] dBm
   [6] beamform    : 0..1  -> he_su_beamformer [Tắt, Bật]
 """
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import torch as th
+import torch
+import torch.nn as nn
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+GLOBAL_SEED = 2026
 
 # =====================================================================================
 # 1. HẰNG SỐ KIẾN TRÚC (đồng bộ 100% với deploy_hil_agent.py & real_router_env.py)
@@ -53,401 +63,643 @@ BEACON_INTS = [80, 300]
 OBSS_PD_DBM = np.array([-82, -77, -72, -67, -62], dtype=np.float64)
 OBSS_PD_OFFSETS = [0, 5, 10, 15, 20]  # he_spr_non_srg_obss_pd_max_offset (so với -82 dBm)
 
-# Bảng HE-MCS chuẩn IEEE 802.11ax (GI 0.8us, 2SS, kênh cơ sở 20 MHz)
-MCS_SNR_REQ = np.array([6.0, 8.6, 11.2, 13.8, 16.4, 19.0, 21.6, 24.2, 26.8, 29.4, 32.0, 34.6], dtype=np.float64)
-MCS_RATE_20 = np.array([8.6, 17.2, 25.8, 34.4, 51.6, 68.8, 77.4, 86.0,
-                        103.2, 114.7, 129.0, 143.4], dtype=np.float64)
-BW_RATE_MULT = np.array([1.0, 2.0, 4.1])   # 242 / 484 / 996 RU tones
-BW_NOISE_DB = np.array([0.0, 2.0, 4.0])    # Suy giảm SNR hiệu dụng khi mở rộng băng thông
-NSS = 2
-REF_TX_DBM = 17.0
-
 QOE_LATENCY_MS = 15.0
 QOE_LOSS = 0.01
 
-_ALL_ACTIONS: Optional[np.ndarray] = None
+
+def piecewise_lr_schedule(initial_value: float = 3.5e-4, min_lr: float = 2.5e-5) -> Callable[[float], float]:
+    """Lịch trình giảm tốc độ học có sàn chặn dưới (Floor-clamped Power Decay)."""
+    def schedule(progress_remaining: float) -> float:
+        decayed = initial_value * (max(float(progress_remaining), 0.0) ** 1.35)
+        return float(max(min_lr, decayed))
+    return schedule
 
 
-class CrossLayerNormExtractor(BaseFeaturesExtractor):
+class NormalizedWifiFeaturesExtractor(BaseFeaturesExtractor):
     """
-    Chuẩn hóa 8 chiều state về [-1, 1] theo biên vật lý [OBS_LOW, OBS_HIGH] ngay trong mạng Policy.
-    Đặt tại module chung để cả Notebook lẫn deploy_hil_agent.py nạp best_model.zip đồng nhất.
+    Bộ trích xuất đặc trưng chuẩn hóa Min-Max nội tuyến về [-1.0, 1.0] cho vector trạng thái 8 chiều:
+    [avg_rssi, noise_floor, sta_count, retry_rate, p_c, airtime_util, ofdma_ratio, is_break_time].
     """
-    def __init__(self, observation_space: spaces.Box, low=None, high=None):
-        super().__init__(observation_space, features_dim=int(observation_space.shape[0]))
-        low_arr = np.asarray(observation_space.low if low is None else low, dtype=np.float32)
-        high_arr = np.asarray(observation_space.high if high is None else high, dtype=np.float32)
-        self.register_buffer("low", th.as_tensor(low_arr))
-        self.register_buffer("scale", th.as_tensor(np.maximum(high_arr - low_arr, 1e-6)))
+    def __init__(self, observation_space: spaces.Box):
+        super().__init__(observation_space, features_dim=64)
+        self.register_buffer("low", torch.tensor(OBS_LOW, dtype=torch.float32))
+        self.register_buffer("high", torch.tensor(OBS_HIGH, dtype=torch.float32))
+        self.net = nn.Sequential(
+            nn.Linear(8, 64),
+            nn.LayerNorm(64),
+            nn.SiLU(),
+            nn.Linear(64, 64),
+            nn.LayerNorm(64),
+            nn.SiLU(),
+        )
 
-    def forward(self, obs: th.Tensor) -> th.Tensor:
-        return th.clamp(2.0 * (obs - self.low) / self.scale - 1.0, -1.5, 1.5)
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        norm_obs = 2.0 * (observations - self.low) / (self.high - self.low + 1e-6) - 1.0
+        norm_obs = torch.clamp(norm_obs, -1.0, 1.0)
+        return self.net(norm_obs)
 
 
-def all_actions() -> np.ndarray:
-    """Liệt kê toàn bộ 3*3*7*12*2*5*2 = 15,120 tổ hợp hành động (phục vụ Oracle vét cạn)."""
-    global _ALL_ACTIONS
-    if _ALL_ACTIONS is None:
-        grids = np.meshgrid(*[np.arange(n) for n in ACTION_NVEC], indexing="ij")
-        _ALL_ACTIONS = np.stack([g.ravel() for g in grids], axis=1).astype(np.int64)
-    return _ALL_ACTIONS
-
-
-def _sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -30.0, 30.0)))
+# Alias tương thích ngược
+CrossLayerNormExtractor = NormalizedWifiFeaturesExtractor
 
 
 # =====================================================================================
-# 2. SINH KỊCH BẢN MẠNG & QUAN SÁT 8 CHIỀU DUAL-SENSING
-# =====================================================================================
-def sample_scenario(rng: np.random.Generator) -> Dict[str, Any]:
-    """
-    Sinh kịch bản mạng đa dạng phủ kín không gian trạng thái 8D:
-      - tier 0 (Kênh sạch)          : Noise Floor -98..-88 dBm -> CH36 (idx 0) tối ưu
-      - tier 1 (Nhiễu đơn kênh CH36): Noise Floor -82..-68 dBm -> Sơ tán sang CH40 (idx 1)
-      - tier 2 (Nhiễu kép CH36+CH40): Noise Floor -66..-55 dBm -> Sơ tán lên CH44 (idx 2)
-      - load_type 0 (Thoáng, <=35 STA)      : HE80 (idx 2) tối ưu
-      - load_type 1 (Lớp học vừa, 38-80 STA): HE40 (idx 1) tối ưu
-      - load_type 2 (Bão Roaming, 85-240 STA): HE20 (idx 0) tối ưu
-      - load_type 3 (Bão UDP Jammer)         : HE20 (idx 0) tối ưu
-    """
-    tier = int(rng.choice(3, p=[0.36, 0.32, 0.32]))
-    load_type = int(rng.choice(4, p=[0.34, 0.28, 0.24, 0.14]))
-
-    if tier == 0:
-        noise_floor = float(rng.uniform(-98.0, -87.0))
-    elif tier == 1:
-        noise_floor = float(rng.uniform(-82.0, -68.0))
-    else:
-        noise_floor = float(rng.uniform(-66.0, -54.0))
-
-    if load_type == 0:      # Thoáng (2..35 STA)
-        sta = float(rng.integers(2, 36))
-        base_airtime = float(rng.uniform(0.12, 0.46))
-        base_pc = float(rng.uniform(0.03, 0.20))
-        base_retry = float(rng.uniform(0.02, 0.14))
-        base_ofdma = float(rng.uniform(0.62, 0.90))
-    elif load_type == 1:    # Lớp học vừa (38..80 STA)
-        sta = float(rng.integers(38, 81))
-        base_airtime = float(rng.uniform(0.48, 0.70))
-        base_pc = float(rng.uniform(0.18, 0.34))
-        base_retry = float(rng.uniform(0.12, 0.28))
-        base_ofdma = float(rng.uniform(0.42, 0.68))
-    elif load_type == 2:    # Bão Roaming chuyển tiết (85..240 STA)
-        sta = float(rng.integers(85, 241))
-        base_airtime = float(rng.uniform(0.75, 0.96))
-        base_pc = float(rng.uniform(0.42, 0.70))
-        base_retry = float(rng.uniform(0.35, 0.65))
-        base_ofdma = float(rng.uniform(0.15, 0.38))
-    else:                   # Bão UDP Lab (ít STA nhưng kênh sạch vẫn nghẽn airtime & rớt OFDMA)
-        sta = float(rng.integers(3, 18))
-        if tier == 0:
-            noise_floor = float(rng.uniform(-96.0, -86.0))
-        base_airtime = float(rng.uniform(0.78, 0.96))
-        base_pc = float(rng.uniform(0.38, 0.68))
-        base_retry = float(rng.uniform(0.38, 0.62))
-        base_ofdma = float(rng.uniform(0.08, 0.22))
-
-    # Nhiễu RF tầng PHY làm tăng p_c, retry, airtime và giảm hiệu suất OFDMA trên kênh hiện tại
-    if tier == 1:
-        base_pc = float(np.clip(max(base_pc, rng.uniform(0.38, 0.65)), 0.0, 0.70))
-        base_retry = float(np.clip(max(base_retry, rng.uniform(0.24, 0.45)), 0.0, 0.85))
-        if load_type == 0:
-            base_airtime = float(np.clip(max(base_airtime, rng.uniform(0.45, 0.62)), 0.0, 0.65))
-        base_ofdma = float(np.clip(min(base_ofdma, rng.uniform(0.32, 0.55)), 0.05, 0.90))
-    elif tier == 2:
-        base_pc = float(np.clip(max(base_pc, rng.uniform(0.75, 0.96)), 0.75, 0.98))
-        base_retry = float(np.clip(max(base_retry, rng.uniform(0.55, 0.85)), 0.0, 0.95))
-        if load_type == 0:
-            base_airtime = float(np.clip(max(base_airtime, rng.uniform(0.55, 0.70)), 0.0, 0.72))
-        base_ofdma = float(np.clip(min(base_ofdma, rng.uniform(0.22, 0.35) if load_type == 0 else rng.uniform(0.10, 0.25)), 0.05, 0.90))
-
-    if load_type == 2:
-        is_break = 1 if rng.random() < 0.85 else 0
-    else:
-        is_break = 1 if rng.random() < 0.28 else 0
-
-    rssi = float(rng.uniform(-84.0, -42.0))
-    obs = np.array([rssi, noise_floor, sta, base_retry, base_pc, base_airtime, base_ofdma, float(is_break)],
-                   dtype=np.float32)
-    obs = np.clip(obs, OBS_LOW, OBS_HIGH)
-    return dict(tier=tier, load_type=load_type, obs=obs, rssi=rssi, sta=sta, is_break=is_break)
-
-
-def observe(scn: Dict[str, Any], rng: Optional[np.random.Generator] = None) -> np.ndarray:
-    """Trả về vector quan sát 8 chiều từ kịch bản."""
-    if "obs" in scn:
-        return np.clip(np.asarray(scn["obs"], dtype=np.float32), OBS_LOW, OBS_HIGH)
-    return np.clip(np.asarray(scn, dtype=np.float32), OBS_LOW, OBS_HIGH)
-
-
-def scenario_from_state(state) -> Dict[str, Any]:
-    """Đóng gói vector state 8D thành dict kịch bản chuẩn."""
-    s = np.clip(np.asarray(state, dtype=np.float32).reshape(-1)[:8], OBS_LOW, OBS_HIGH)
-    return dict(obs=s, rssi=float(s[0]), sta=float(s[2]), is_break=int(round(float(s[7]))))
-
-
-# =====================================================================================
-# 3. MÔ HÌNH VẬT LÝ CROSS-LAYER & HÀM THƯỞNG ĐA MỤC TIÊU (ĐỦ 7 VŨ KHÍ)
-# =====================================================================================
-def evaluate_actions(scn_or_state, actions) -> Dict[str, np.ndarray]:
-    """
-    Đánh giá N hành động (N x 7) trực tiếp từ vector trạng thái 8D Cross-Layer:
-      state = [avg_rssi, noise_floor, sta_count, retry_rate, p_c, airtime_util, ofdma_ratio, is_break_time]
-
-    Nhờ Dual Sensing (PHY Preamble Sensing + MAC-layer Sensing), tác tử phân biệt chính xác:
-      - Nhiễu RF ngoại lai (noise_floor cao, p_c cao nhưng sta_count thấp):
-        Đổi sang kênh trực giao sạch (CH40 hoặc CH44) VÀ giữ băng thông rộng HE80!
-      - Bão Roaming / Nghẽn CSMA/CA (sta_count > 80) hoặc Bão UDP (airtime > 0.74 & ofdma < 0.25):
-        Co băng thông về HE20 để cô lập miền va chạm + tăng +6dB PSD!
-      - Tải lớp học trung bình (35 < sta_count <= 80):
-        Chọn băng thông cân bằng HE40!
-      - Đồng thời tối ưu đồng bộ 5 vũ khí còn lại: Tx Power (14..20dBm), MCS Ceiling (0..11),
-        Beacon Interval (80/300ms), OBSS-PD Spatial Reuse (-82..-62dBm), và SU-Beamforming (ON/OFF).
-    """
-    s = scn_or_state["obs"] if isinstance(scn_or_state, dict) else np.asarray(scn_or_state, dtype=np.float32)
-    rssi = float(s[0])
-    noise_floor = float(s[1])
-    sta = float(s[2])
-    retry = float(s[3])
-    pc_obs = float(s[4])
-    airtime = float(s[5])
-    ofdma = float(s[6])
-    brk = int(round(float(s[7])))
-
-    a = np.atleast_2d(np.asarray(actions, dtype=np.int64))
-    ch, bw, tx, mcs, bcn, obss, bf = (a[:, i] for i in range(7))
-    density = float(np.clip(sta / 120.0, 0.0, 1.0))
-
-    # ---- (1) Chọn Kênh Trực giao (action[0]: 0=CH36, 1=CH40, 2=CH44) ----
-    if noise_floor > -70.0 or pc_obs >= 0.72:
-        # Nhiễu kép đè cả CH36 & CH40 -> Sơ tán lên CH44 (idx 2)
-        ch_interf_vec = np.array([0.78, 0.68, 0.03], dtype=np.float64)
-        ideal_ch = 2
-    elif noise_floor > -85.0 or pc_obs >= 0.35:
-        # Nhiễu đơn kênh đè CH36 -> Sơ tán sang CH40 (idx 1)
-        ch_interf_vec = np.array([0.58, 0.03, 0.16], dtype=np.float64)
-        ideal_ch = 1
-    else:
-        # Kênh sạch -> Giữ Kênh chuẩn CH36 (idx 0)
-        ch_interf_vec = np.array([0.02, 0.13, 0.17], dtype=np.float64)
-        ideal_ch = 0
-    ch_interf = ch_interf_vec[ch]
-
-    # ---- (2) Co giãn Băng thông (action[1]: 0=HE20, 1=HE40, 2=HE80) ----
-    # Phân biệt Bão MAC (Roaming Storm / UDP Storm) với Nhiễu RF đơn thuần nhờ Dual Sensing:
-    is_udp_storm = (sta <= 35.0) and (airtime > 0.75)
-    is_roaming_storm = (sta > 80.0)
-    is_medium_classroom = (not is_roaming_storm) and (not is_udp_storm) and (35.0 < sta <= 80.0)
-
-    if is_roaming_storm or is_udp_storm:
-        ideal_bw = 0  # HE20 chống bão tải / bão UDP
-        bw_cong_pen = np.array([0.0, 0.26, 0.52])[bw]
-    elif is_medium_classroom:
-        ideal_bw = 1  # HE40 cân bằng cho lớp học 36..80 học sinh
-        bw_cong_pen = np.array([0.10, 0.0, 0.22])[bw]
-    else:
-        ideal_bw = 2  # HE80 bung tốc độ đỉnh khi STA <= 35 (kể cả sau khi đã nhảy sang kênh sạch!)
-        bw_cong_pen = np.array([0.16, 0.06, 0.0])[bw]
-
-    interf_eff = np.clip(ch_interf * (1.0 + 0.15 * bw), 0.0, 1.0)
-    noise_ch = -95.0 + 40.0 * interf_eff
-
-    # ---- (3) Công suất phát Tx (action[2]: 0..6 -> 14..20 dBm) ----
-    tx_dbm = TX_POWER_DBM[tx]
-    ideal_tx_idx = int(np.clip(np.round((-43.0 - rssi) / 6.2 - (0.4 if sta > 100.0 else 0.0)), 0, 6))
-    ideal_tx_dbm = TX_POWER_DBM[ideal_tx_idx]
-    tx_diff = np.abs(tx - ideal_tx_idx)
-    cci_tx_pen = 0.025 * np.maximum(0.0, tx_dbm - ideal_tx_dbm) * (0.6 + density)
-
-    # ---- (4) SU-Beamforming (action[6]: 0=OFF, 1=ON) ----
-    bf_helpful = (sta <= 65.0) and (not (brk == 1 and sta > 35.0)) and (ofdma >= 0.20)
-    ideal_bf = 1 if bf_helpful else 0
-    bf_gain_db = np.where(bf == 1, 3.5 if bf_helpful else 0.4, 0.0)
-    sounding_oh = np.where(bf == 1, min(0.30, 0.0025 * sta + (0.14 if not bf_helpful else 0.01)), 0.0)
-
-    # ---- (5) Trần điều chế MCS (action[3]: 0..11 -> HE-MCS 0..11) ----
-    # Đánh giá SNR kỳ vọng sau khi áp dụng công suất, băng thông và beamforming tối ưu trên kênh mục tiêu
-    ref_snr = (
-        rssi + (ideal_tx_dbm - REF_TX_DBM) - (-95.0 + 40.0 * ch_interf_vec[ideal_ch])
-        - BW_NOISE_DB[ideal_bw] + (3.5 if bf_helpful else 0.0)
-        - (4.5 * retry + 1.5 * brk + 1.2 * density)
-    )
-    ideal_mcs = int(np.clip(np.floor((ref_snr - 6.0) / 2.6), 0, 11))
-
-    useful_tx_dbm = np.minimum(tx_dbm, ideal_tx_dbm + 0.5)
-    snr = rssi + (useful_tx_dbm - REF_TX_DBM) - noise_ch - BW_NOISE_DB[bw] + bf_gain_db
-    eff_snr = snr - (4.5 * retry + 1.5 * brk + 3.0 * interf_eff + 1.2 * density)
-    per = np.where(
-        mcs <= ideal_mcs,
-        0.012 * np.exp(-0.4 * np.maximum(0, ideal_mcs - mcs)),
-        np.clip(0.14 * (np.maximum(0, mcs - ideal_mcs) ** 1.6), 0.0, 0.95)
-    )
-    mcs_diff = np.abs(mcs - ideal_mcs)
-    phy_rate = MCS_RATE_20[mcs] * BW_RATE_MULT[bw] * NSS
-
-    # ---- (6) OBSS-PD Spatial Reuse (action[5]: 0..4 -> -82..-62 dBm) ----
-    rssi_margin = float(np.clip((rssi + 82.0) / 38.0, 0.0, 1.0))
-    ideal_obss = int(np.clip(np.round(4.3 * rssi_margin * np.clip(0.85 * airtime + 0.15, 0.0, 1.0)), 0, 4))
-    obss_diff = np.abs(obss - ideal_obss)
-    obss_gain = 0.07 * airtime * (1.0 - 0.35 * obss_diff)
-    obss_hidden_pen = 0.045 * np.maximum(0, obss - ideal_obss) + 0.025 * obss_diff
-
-    # ---- (7) Chu kỳ phát Beacon (action[4]: 0=80ms, 1=300ms) ----
-    need_fast_beacon = (brk == 1) or (sta > 90.0)
-    ideal_bcn = 0 if need_fast_beacon else 1
-    beacon_oh = np.where(bcn == 0, 0.028, 0.008)
-    roam_pen_ms = np.where(need_fast_beacon & (bcn == 1), 5.5, 0.0)
-
-    # ---- (8) Tổng hợp p_c, Thông lượng, Độ trễ P99 & Loss ----
-    p_c = np.clip(
-        0.02 + 0.65 * ch_interf + 0.18 * (airtime ** 1.2) + bw_cong_pen
-        + cci_tx_pen + obss_hidden_pen - obss_gain,
-        0.01, 0.98
-    )
-    airtime_eff = np.clip(1.0 - beacon_oh - sounding_oh, 0.25, 1.0)
-    capacity = 0.70 * phy_rate * (1.0 - per) * (1.0 - p_c) * airtime_eff
-
-    offered = float(np.clip(sta * (1.2 if sta > 80 else (2.8 if sta > 35 else 6.0)) + (220.0 if is_udp_storm else 0.0), 10.0, 650.0))
-    served_tput = np.minimum(capacity, offered)
-    effective_tput = 0.50 * served_tput + 0.50 * capacity
-    rho = offered / np.maximum(capacity, 1.0)
-
-    queue_ms = np.where(rho < 1.0, 1.6 * rho / np.maximum(1.0 - rho, 0.08), 5.2)
-    queue_ms = np.minimum(queue_ms, 5.2)                           # AQL (1200us) + FQ-CoDel (target 5ms)
-    access_ms = 1.0 + 9.5 * (p_c ** 2) / (1.0 - p_c + 0.06)
-    retx_ms = 5.0 * per / (1.0 - per + 0.06)
-    latency = 1.5 + access_ms + retx_ms + queue_ms + roam_pen_ms
-
-    aqm_drop = np.clip(1.0 - 1.0 / np.maximum(rho, 1e-6), 0.0, 1.0)
-    link_loss = (1.0 - (1.0 - per) * (1.0 - p_c)) ** 6
-    loss = np.clip(link_loss + 0.005 * aqm_drop, 0.0, 1.0)
-
-    # ---- (9) Hàm thưởng Đa mục tiêu (QoE Supremacy + 7D Action Shaping rõ nét) ----
-    tput_score = 2.2 * np.log1p(effective_tput) / np.log1p(900.0)
-    sla_lat = np.clip((latency - QOE_LATENCY_MS) / QOE_LATENCY_MS, 0.0, 3.0)
-    sla_loss = np.clip((loss - QOE_LOSS) / 0.015, 0.0, 3.0)
-    sla_ok = (latency <= QOE_LATENCY_MS) & (loss <= QOE_LOSS)
-
-    ch_align = np.where(ch == ideal_ch, 0.35, -0.25)
-    bw_align = np.where(bw == ideal_bw, 0.35, -0.20 * np.abs(bw - ideal_bw))
-    tx_align = -0.09 * tx_diff
-    mcs_align = -0.18 * mcs_diff - 0.30 * np.maximum(0, mcs - ideal_mcs)
-    bcn_align = np.where(bcn == ideal_bcn, 0.22, -0.15)
-    obss_align = -0.09 * obss_diff
-    bf_align = np.where(bf == ideal_bf, 0.22, -0.15)
-
-    reward = (
-        tput_score
-        - 3.0 * (p_c ** 2)
-        - 1.5 * sla_lat
-        - 1.5 * sla_loss
-        + 0.45 * sla_ok
-        + ch_align + bw_align + tx_align + mcs_align + bcn_align + obss_align + bf_align
-    )
-
-    return dict(
-        reward=reward, throughput=effective_tput, served_tput=served_tput, capacity=capacity,
-        latency=latency, loss=loss, p_c=p_c, per=per, snr=snr, sla_ok=sla_ok,
-        ideal_action=np.array([ideal_ch, ideal_bw, ideal_tx_idx, ideal_mcs, ideal_bcn, ideal_obss, ideal_bf], dtype=np.int64)
-    )
-
-
-def oracle_best(scn_or_state, exhaustive: bool = False):
-    """
-    Trả về (action tối ưu 7D, reward tối ưu, reward trung bình ngẫu nhiên).
-    Nhờ mô hình vật lý đồng bộ, ideal_action trùng khớp 100% với cực đại hàm thưởng 15,120 cấu hình!
-    """
-    if exhaustive:
-        acts = all_actions()
-        res = evaluate_actions(scn_or_state, acts)
-        r = res["reward"]
-        i = int(np.argmax(r))
-        return acts[i].copy(), float(r[i]), float(r.mean())
-    res_ideal = evaluate_actions(scn_or_state, np.zeros((1, 7), dtype=np.int64))
-    opt_a = res_ideal["ideal_action"].copy()
-    opt_r = float(evaluate_actions(scn_or_state, opt_a[None, :])["reward"][0])
-    rand_r = float(evaluate_actions(scn_or_state, all_actions()[::120])["reward"].mean())
-    return opt_a, opt_r, rand_r
-
-
-# =====================================================================================
-# 4. MÔI TRƯỜNG GYMNASIUM BẢN SAO SỐ (ULTIMATE DIGITAL TWIN ENV)
+# 2. BẢN SAO SỐ VẬT LÝ NHÂN QUẢ 4 TẦNG (ULTIMATE DIGITAL TWIN ENV)
 # =====================================================================================
 class UltimateDigitalTwinEnv(gym.Env):
     """
-    Bản sao số Cross-Layer 8D State (MAC + PHY Preamble Sensing) & 7D Action.
-    Hỗ trợ Stratified Curriculum + Domain Randomization để huấn luyện PPO hội tụ toàn diện.
+    Bản sao số Vật lý Nhân quả Chuẩn IEEE 802.11ax (Causal Physics-Driven Digital Twin):
+    1. Mô hình hóa chính xác Chồng lấp Phổ tần khi Gộp kênh (Channel Bonding HE20/HE40/HE80).
+    2. Tính toán chuỗi nhân quả 4 tầng:
+       Môi trường RF + Tải + Hành động A_t
+       -> Phổ kênh Bonding + SINR + PHY Rate + Va chạm CSMA/CA (p_c)
+       -> Goodput (Bảo toàn lưu lượng) + Hàng đợi AQM/AQL + Trễ P99 + Loss
+       -> Reward R_t.
+    3. Liên kết nhân quả trạng thái kế tiếp: (s_t, a_t) -> s_{t+1} (bao gồm cả noise_on_chosen_ch).
+    4. Dùng chung 100% lõi vật lý giữa step(), simulate_future() và compute_optimal_targets().
     """
     metadata = {"render_modes": []}
 
-    def __init__(self, hardware_type: str = "WIFI_6", max_steps: int = 300,
-                 obs_noise: bool = True, seed: Optional[int] = None):
+    MCS_BASE_RATE_20MHZ = np.array(
+        [17.2, 34.4, 51.6, 68.8, 103.2, 137.6, 154.9, 172.1, 206.5, 229.4, 258.1, 286.8],
+        dtype=np.float32,
+    )
+    MCS_REQ_SINR_DB = np.array(
+        [5.0 + 2.2 * m for m in range(12)],
+        dtype=np.float32,
+    )
+
+    def __init__(self, hardware_type: str = "WIFI_6", aqm_enabled: bool = True,
+                 max_steps: int = 300, seed: int = GLOBAL_SEED):
         super().__init__()
-        self.hardware_type = hardware_type
+        self.hardware_type = hardware_type.upper()
+        self.aqm_enabled = aqm_enabled
         self.max_steps = max_steps
-        self.obs_noise = obs_noise
-        self.action_space = spaces.MultiDiscrete(ACTION_NVEC)
-        self.observation_space = spaces.Box(low=OBS_LOW, high=OBS_HIGH, dtype=np.float32)
         self.rng = np.random.default_rng(seed)
+
+        self.action_space = spaces.MultiDiscrete([3, 3, 7, 12, 2, 5, 2])
+        self.observation_space = spaces.Box(low=OBS_LOW.copy(), high=OBS_HIGH.copy(), dtype=np.float32)
+
         self.current_step = 0
         self.previous_action = None
-        self.scn: Dict[str, Any] = sample_scenario(self.rng)
-        self.regime_left = 20
+        self.scenario_mode = 0
+        self.current_obs = None
 
-    def _new_regime(self):
-        self.regime_left = int(self.rng.integers(10, 35))
-        self.scn = sample_scenario(self.rng)
+    @staticmethod
+    def _dbm_sum(dbm_a: float, dbm_b: float) -> float:
+        """Cộng công suất nhiễu theo thang tuyến tính mW rồi quy đổi ngược về dBm."""
+        mw = (10.0 ** (dbm_a / 10.0)) + (10.0 ** (dbm_b / 10.0))
+        return float(10.0 * np.log10(max(mw, 1e-12)))
 
-    def _drift(self):
-        obs = self.scn["obs"].copy()
-        obs[0] = float(np.clip(obs[0] + self.rng.normal(0, 0.5), -85.0, -41.0))
-        obs[1] = float(np.clip(obs[1] + self.rng.normal(0, 0.4), -99.0, -53.0))
-        obs[2] = float(np.clip(round(obs[2] + self.rng.normal(0, max(0.5, 0.02 * obs[2]))), 1.0, 260.0))
-        self.scn["obs"] = np.clip(obs, OBS_LOW, OBS_HIGH)
+    @classmethod
+    def _classify_regime(cls, obs: np.ndarray) -> Dict[str, Any]:
+        """
+        Phân tách chính xác Nhiễu RF (Tầng PHY + MAC) và Nghẽn Tranh chấp (Tầng MAC + OFDMA):
+        - Phải nhìn kết hợp cả noise_obs & ofdma_obs (PHY Preamble Sensing) cùng pc_obs, retry_obs, sta, airtime_obs (MAC Sensing).
+        """
+        rssi, noise_obs, sta, retry_obs, pc_obs, airtime_obs, ofdma_obs, is_break = [
+            float(x) for x in obs
+        ]
+        is_roaming_storm = (sta > 80.0)
+        # Bão UDP Jammer: STA không đông nhưng Airtime cao và khung ngắn làm sập tỷ lệ ghép kênh OFDMA (< 0.36)
+        is_udp_storm = (sta <= 80.0) and (airtime_obs > 0.72) and (ofdma_obs < 0.36)
+        is_heavy_congestion = is_roaming_storm or is_udp_storm
+        is_medium_load = (not is_heavy_congestion) and (35.0 < sta <= 80.0)
 
-    def _obs(self):
-        return observe(self.scn, self.rng if self.obs_noise else None)
+        # Nhiễu RF Kép đè cả CH36 & CH40: Bắt buộc tầng PHY báo noise_obs > -72.0 dBm VÀ tầng MAC có va chạm lớn
+        is_severe_rf = (noise_obs > -72.0) and (pc_obs >= 0.60 or retry_obs >= 0.22)
+        # Nhiễu RF Đơn kênh tại CH36: Tầng PHY báo noise_obs trong (-84.0, -72.0] dBm VÀ tầng MAC có va chạm
+        is_moderate_rf = (not is_severe_rf) and (
+            ((noise_obs > -84.0) and (pc_obs >= 0.22 or retry_obs >= 0.14))
+            or (pc_obs >= 0.85 and sta <= 75.0)
+        )
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        # Kênh tối ưu lý tưởng theo phổ nhiễu RF
+        if is_severe_rf:
+            ideal_ch = 2  # Kênh 44 (Ốc đảo sạch khi 36+40 bị nhiễu kép)
+            sub_noise_dbm = np.array(
+                [max(noise_obs, -65.0), max(noise_obs - 1.5, -67.0), -95.5],
+                dtype=np.float32,
+            )
+        elif is_moderate_rf:
+            ideal_ch = 1  # Kênh 40 (Sơ tán đơn kênh khi 36 bị nhiễu)
+            sub_noise_dbm = np.array(
+                [max(noise_obs, -76.0), -95.5, -85.0],
+                dtype=np.float32,
+            )
+        else:
+            ideal_ch = 0  # Kênh 36 (Kênh chuẩn sạch nhất khi không có nhiễu RF ngoại lai)
+            sub_noise_dbm = np.array([-96.5, -94.0, -92.5], dtype=np.float32)
+
+        # Băng thông tối ưu theo áp lực tranh chấp MAC + chồng lấp phổ Channel Bonding
+        if is_heavy_congestion:
+            ideal_bw = 0  # HE20: Nén miền va chạm + tăng +6dB PSD chống Bão Roaming / Bão UDP
+        elif is_medium_load or is_moderate_rf or is_severe_rf:
+            ideal_bw = 1  # HE40: Cân bằng dung lượng 40MHz và tránh chồng phổ 80MHz vào kênh nhiễu
+        else:
+            ideal_bw = 2  # HE80: Bung toàn bộ 80MHz khi kênh sạch và tải thoáng (STA <= 35)
+
+        # Công suất phát Tx Power tối ưu (0..6 -> 14..20 dBm)
+        ideal_tx = int(np.clip(np.round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0, 6))
+
+        # Beacon Interval tối ưu theo ngữ cảnh giờ giải lao (is_break_time)
+        ideal_bcn = 0 if int(round(is_break)) == 1 else 1
+
+        # Beamforming tối ưu: Bật (1) để tăng +2.8dB SINR; tắt (0) khi quá đông STA (>110) và retry cao để tránh overhead sounding
+        ideal_bf = 0 if (sta > 110.0 and retry_obs > 0.48) else 1
+
+        # Ngưỡng OBSS-PD tối ưu (-82..-62 dBm -> idx 0..4) điều khiển trực tiếp bởi cảm biến PHY ofdma_obs
+        if ofdma_obs < 0.20:
+            ideal_obss = 0
+        elif ofdma_obs < 0.34:
+            ideal_obss = 1
+        elif ofdma_obs < 0.50:
+            ideal_obss = 2
+        elif ofdma_obs < 0.72:
+            ideal_obss = 3
+        else:
+            ideal_obss = 4
+
+        # Tính SINR chuẩn tại cấu hình tối ưu để xác định trần MCS chuẩn xác theo Sigmoid
+        opt_sub_noise = float(sub_noise_dbm[ideal_ch])
+        if ideal_bw == 0:
+            opt_eff_noise = opt_sub_noise - 2.0
+        elif ideal_bw == 1:
+            if ideal_ch == 1:
+                opt_eff_noise = cls._dbm_sum(sub_noise_dbm[1], float(sub_noise_dbm[0]) - 15.0) + 1.0
+            else:
+                opt_eff_noise = opt_sub_noise + 1.5
+        else:
+            bonded_all = cls._dbm_sum(cls._dbm_sum(sub_noise_dbm[0], sub_noise_dbm[1]), sub_noise_dbm[2])
+            opt_eff_noise = bonded_all + 2.5
+
+        opt_tx_dbm = 14.0 + float(ideal_tx)
+        opt_bf_gain = 2.8 if ideal_bf == 1 else 1.2
+        if is_moderate_rf or is_severe_rf:
+            fading_margin_db = 2.0 + 2.0 * (sta / 100.0)
+        else:
+            fading_margin_db = (
+                (5.0 if is_heavy_congestion else (2.5 if is_medium_load else 0.0))
+                + 5.5 * max(0.0, 0.55 - ofdma_obs)
+            )
+        opt_sinr_db = (rssi + 0.65 * (opt_tx_dbm - 17.0) + opt_bf_gain) - opt_eff_noise - fading_margin_db
+        ideal_mcs = int(np.clip(np.searchsorted(cls.MCS_REQ_SINR_DB, opt_sinr_db - 3.8, side="right") - 1, 0, 11))
+
+        return {
+            "is_roaming_storm": is_roaming_storm,
+            "is_udp_storm": is_udp_storm,
+            "is_heavy_congestion": is_heavy_congestion,
+            "is_medium_load": is_medium_load,
+            "is_severe_rf": is_severe_rf,
+            "is_moderate_rf": is_moderate_rf,
+            "sub_noise_dbm": sub_noise_dbm,
+            "fading_margin_db": fading_margin_db,
+            "ideal_action": np.array(
+                [ideal_ch, ideal_bw, ideal_tx, ideal_mcs, ideal_bcn, ideal_obss, ideal_bf],
+                dtype=np.int64,
+            ),
+        }
+
+    @classmethod
+    def evaluate_network_physics(
+        cls,
+        obs: np.ndarray,
+        action: np.ndarray,
+        prev_action: np.ndarray = None,
+        aqm_enabled: bool = True,
+    ) -> Dict[str, float]:
+        """
+        HÀM LÕI VẬT LÝ NHÂN QUẢ 4 TẦNG DUY NHẤT (SINGLE SOURCE OF TRUTH):
+        Tính toán đầy đủ các đại lượng mạng từ trạng thái quan sát 8D (obs) và hành động 7D (action).
+        """
+        try:
+            rssi, noise_obs, sta, retry_obs, pc_obs, airtime_obs, ofdma_obs, is_break = [
+                float(x) for x in obs
+            ]
+            ch_idx, bw_idx, tx_idx, mcs_idx, beacon_idx, obss_idx, bf_idx = [
+                int(x) for x in action
+            ]
+
+            reg = cls._classify_regime(obs)
+            sub_noise_dbm = reg["sub_noise_dbm"]
+            is_heavy_congestion = reg["is_heavy_congestion"]
+            is_medium_load = reg["is_medium_load"]
+            is_severe_rf = reg["is_severe_rf"]
+            is_moderate_rf = reg["is_moderate_rf"]
+            fading_margin_db = reg["fading_margin_db"]
+            ideal_ch, ideal_bw, ideal_tx, ideal_mcs, ideal_bcn, ideal_obss, ideal_bf = [
+                int(x) for x in reg["ideal_action"]
+            ]
+
+            chosen_sub_noise_dbm = float(sub_noise_dbm[ch_idx])
+
+            # 2. Tầng 1 -> Tầng 2: Mô hình Chồng lấp Phổ tần khi Gộp kênh (Channel Bonding Spectrum Overlap)
+            if bw_idx == 0:  # HE20 (20 MHz): Tách biệt hoàn toàn giữa 36, 40, 44 (PSD Gain +6 dB)
+                eff_noise_dbm = chosen_sub_noise_dbm - 2.0
+                bw_tonal_factor = 1.00
+            elif bw_idx == 1:  # HE40 (40 MHz): Khối {36, 40} hoặc {44, 48} (+3 dB noise)
+                if ch_idx == 0:
+                    eff_noise_dbm = cls._dbm_sum(sub_noise_dbm[0], sub_noise_dbm[1]) + 1.5
+                elif ch_idx == 1:
+                    sec_leak_dbm = float(sub_noise_dbm[0]) - 15.0
+                    eff_noise_dbm = cls._dbm_sum(sub_noise_dbm[1], sec_leak_dbm) + 1.0
+                else:
+                    eff_noise_dbm = float(sub_noise_dbm[2]) + 1.5
+                bw_tonal_factor = 2.08
+            else:  # HE80 (80 MHz): Trải toàn bộ khối UNII-1 (36+40+44+48) -> Dính nhiễu của mọi kênh con bị đè!
+                bonded_all = cls._dbm_sum(cls._dbm_sum(sub_noise_dbm[0], sub_noise_dbm[1]), sub_noise_dbm[2])
+                primary_pen = 0.0 if ch_idx == 0 else (1.8 if ch_idx == 1 else 2.8)
+                eff_noise_dbm = bonded_all + 2.5 + primary_pen
+                bw_tonal_factor = 4.05
+
+            # 3. Ngân sách Đường truyền (Link Budget: Tx Power + Beamforming + OBSS-PD)
+            tx_power_dbm = 14.0 + float(tx_idx)  # 14..20 dBm
+            bf_gain_db = 2.8 if (bf_idx == 1 and ideal_bf == 1) else (1.2 if (bf_idx == 0 and ideal_bf == 0) else -1.5)
+            rssi_compensated = rssi + 0.65 * (tx_power_dbm - 17.0) + max(0.0, bf_gain_db)
+
+            tx_mismatch_db = abs(tx_idx - ideal_tx) * 0.90
+            obss_mismatch_db = abs(obss_idx - ideal_obss) * 1.15
+
+            eff_sinr_db = float(
+                rssi_compensated - eff_noise_dbm - fading_margin_db - tx_mismatch_db - obss_mismatch_db + min(0.0, bf_gain_db)
+            )
+
+            # 4. Tỷ lệ Lỗi Khung tầng PHY (PER) theo đường cong Sigmoid chuẩn IEEE 802.11ax
+            req_sinr_db = float(cls.MCS_REQ_SINR_DB[mcs_idx])
+            mcs_overreach = max(0, mcs_idx - ideal_mcs)
+            mcs_underreach = max(0, ideal_mcs - mcs_idx)
+            per_sigmoid = float(1.0 / (1.0 + np.exp(0.85 * (eff_sinr_db - req_sinr_db))))
+            per_phy = float(np.clip(per_sigmoid + 0.06 * (mcs_overreach ** 2), 0.002, 0.98))
+            mcs_mismatch_pen = 0.035 * mcs_underreach + 0.065 * mcs_overreach
+
+            # 5. Mô hình Va chạm CSMA/CA (Bianchi DCF) kết hợp trực tiếp OFDMA_obs và Độ rộng Băng thông
+            if is_heavy_congestion:
+                bw_contention_factor = 0.45 if bw_idx == 0 else (1.65 if bw_idx == 1 else 2.45)
+            elif is_medium_load or is_moderate_rf or is_severe_rf:
+                bw_contention_factor = 1.05 if bw_idx == 0 else (0.55 if bw_idx == 1 else 1.75)
+            else:
+                bw_contention_factor = 1.35 if bw_idx == 0 else (0.95 if bw_idx == 1 else 0.30)
+
+            channel_interf_ratio = float(np.clip((eff_noise_dbm - (-95.0)) / 32.0, 0.01, 0.90))
+            ofdma_deficit = max(0.0, 0.65 - ofdma_obs)
+            if (is_moderate_rf or is_severe_rf) and (ch_idx == ideal_ch) and (bw_idx <= 1):
+                load_pressure = float(np.clip((sta / 145.0) + 0.18 * airtime_obs, 0.04, 0.65))
+                effective_ofdma_obs = max(ofdma_obs, 0.62)
+            else:
+                load_pressure = float(np.clip((sta / 135.0) + 0.45 * airtime_obs + 0.40 * ofdma_deficit, 0.04, 1.30))
+                effective_ofdma_obs = ofdma_obs
+
+            ofdma_efficiency = float(
+                np.clip(
+                    0.52 * effective_ofdma_obs
+                    + 0.36 * (1.0 - 0.18 * bw_idx)
+                    + (0.08 if bf_idx == ideal_bf else -0.06)
+                    - 0.25 * channel_interf_ratio,
+                    0.08,
+                    0.95,
+                )
+            )
+            mac_contention = load_pressure * bw_contention_factor * (1.0 - 0.38 * ofdma_efficiency)
+
+            p_c = float(
+                np.clip(
+                    0.42 * channel_interf_ratio
+                    + 0.42 * mac_contention
+                    + 0.42 * per_phy
+                    + mcs_mismatch_pen
+                    + 0.03 * abs(obss_idx - ideal_obss),
+                    0.02,
+                    0.98,
+                )
+            )
+            retry_rate = float(np.clip(0.55 * p_c + 0.45 * per_phy, 0.01, 0.98))
+
+            # 6. Tầng 2 -> Tầng 3: Service Capacity, Offered Load & Bảo toàn Lưu lượng Goodput
+            beacon_overhead = 0.045 if beacon_idx == 0 else 0.015
+            roaming_efficiency = 1.0 if beacon_idx == ideal_bcn else 0.88
+            ofdma_tput_boost = 0.88 + 0.25 * ofdma_efficiency
+
+            effective_mcs_rate = 0.25 * float(cls.MCS_BASE_RATE_20MHZ[mcs_idx]) + 0.12 * 137.6
+            phy_rate_mbps = effective_mcs_rate * bw_tonal_factor * roaming_efficiency * ofdma_tput_boost
+            service_capacity_mbps = float(
+                max(8.0, phy_rate_mbps * (1.0 - beacon_overhead) * (1.0 - p_c) * (1.0 - 0.60 * per_phy))
+            )
+
+            mcs_scale = 0.84 * float((0.25 * float(cls.MCS_BASE_RATE_20MHZ[ideal_mcs]) + 0.12 * 137.6) / 88.212)
+
+            if (not is_heavy_congestion) and (not is_medium_load) and (not is_moderate_rf) and (not is_severe_rf):
+                offered_load_mbps = float(np.clip(195.0 + sta * 1.2 + 25.0 * airtime_obs, 205.0, 245.0) * mcs_scale)
+            elif is_medium_load or is_moderate_rf or is_severe_rf:
+                offered_load_mbps = float(np.clip(98.0 + sta * 0.35 + 15.0 * airtime_obs, 105.0, 132.0) * mcs_scale)
+            else:
+                offered_load_mbps = float(np.clip(26.0 + sta * 0.04 + 6.0 * airtime_obs, 30.0, 38.5) * mcs_scale)
+
+            # ĐỊNH LUẬT BẢO TOÀN LƯU LƯỢNG: Goodput = min(Offered_Load, Service_Capacity)
+            goodput_mbps = float(min(offered_load_mbps, service_capacity_mbps))
+            airtime_next = float(np.clip(offered_load_mbps / max(service_capacity_mbps, 10.0), 0.08, 0.99))
+
+            # 7. Mô hình Hàng đợi M/G/1 + AQM (FQ-CoDel + Adaptive AQL 1200us) -> Trễ P99 & Loss
+            rho = offered_load_mbps / max(service_capacity_mbps, 8.0)
+            overload_ratio = max(0.0, (offered_load_mbps - service_capacity_mbps) / max(offered_load_mbps, 1.0))
+
+            if aqm_enabled:
+                ofdma_queue_relief = 1.0 - 0.24 * ofdma_efficiency
+                queue_delay_ms = (1.1 + 2.4 * min(rho, 1.0) + (26.0 * min(rho - 1.0, 2.5) if rho > 1.02 else 0.0)) * ofdma_queue_relief
+            else:
+                queue_delay_ms = 4.5 + 18.0 * (min(rho, 3.5) ** 2) + (38.0 * max(0.0, rho - 0.85))
+
+            retrans_delay_ms = 1.20 * (retry_rate / max(1.0 - retry_rate, 0.16))
+            mean_latency_ms = 1.65 + queue_delay_ms + retrans_delay_ms
+            jitter_ms = 0.12 + 1.45 * (p_c ** 2) + (1.85 * overload_ratio if aqm_enabled else 9.5 * overload_ratio)
+            p99_latency_ms = float(mean_latency_ms + 2.33 * jitter_ms)
+
+            mac_exhaust_loss = (p_c * per_phy) ** 3
+            congestion_drop = (0.065 * overload_ratio) if aqm_enabled else (0.58 * overload_ratio)
+            packet_loss_ratio = float(np.clip(mac_exhaust_loss + congestion_drop, 0.0, 1.0))
+            packet_loss_pct = packet_loss_ratio * 100.0
+
+            # 8. Tầng 3 -> Tầng 4: Goodput + Hàng đợi AQM/AQL + Trễ P99 + Loss -> Reward R_t
+            goodput_fulfillment = goodput_mbps / max(offered_load_mbps, 1.0)
+            tput_score = 1.80 * goodput_fulfillment + 0.65 * (goodput_mbps / 100.0)
+            penalty_collision = 3.8 * (p_c ** 2)
+            penalty_latency = 0.035 * min(p99_latency_ms, 60.0) + 1.15 * float(np.tanh(max(0.0, p99_latency_ms - 15.0) / 18.0))
+            penalty_loss = 3.0 * packet_loss_ratio + (0.55 if packet_loss_pct >= 1.0 else 0.0)
+            sla_bonus = 0.55 if (p99_latency_ms <= 15.0 and packet_loss_pct < 1.0) else -0.35
+            beacon_bonus = 0.30 if (beacon_idx == ideal_bcn) else -0.15
+
+            weapon_shaping = (
+                - 0.45 * (0.0 if ch_idx == ideal_ch else 1.0)
+                - 0.85 * abs(bw_idx - ideal_bw)
+                - 0.25 * abs(tx_idx - ideal_tx)
+                - 0.16 * abs(mcs_idx - ideal_mcs)
+                - 0.42 * abs(obss_idx - ideal_obss)
+                - 0.30 * abs(bf_idx - ideal_bf)
+            )
+
+            penalty_action_flapping = 0.0
+            if prev_action is not None and (not is_heavy_congestion) and (not is_severe_rf) and (not is_moderate_rf):
+                if int(prev_action[0]) == 0 and ch_idx != int(prev_action[0]):
+                    penalty_action_flapping -= 0.45
+                if int(prev_action[1]) == 2 and bw_idx != int(prev_action[1]):
+                    penalty_action_flapping -= 0.25
+
+            reward = float(
+                tput_score
+                - penalty_collision
+                - penalty_latency
+                - penalty_loss
+                + sla_bonus
+                + beacon_bonus
+                + weapon_shaping
+                + penalty_action_flapping
+            )
+
+            return {
+                "reward": reward,
+                "throughput": service_capacity_mbps,
+                "goodput": goodput_mbps,
+                "offered_load": offered_load_mbps,
+                "p_c": p_c,
+                "retry_rate": retry_rate,
+                "per_phy": per_phy,
+                "eff_sinr_db": eff_sinr_db,
+                "eff_rssi_dbm": rssi_compensated,
+                "eff_noise_dbm": eff_noise_dbm,
+                "chosen_sub_noise_dbm": chosen_sub_noise_dbm,
+                "airtime_next": airtime_next,
+                "ofdma_next": ofdma_efficiency,
+                "p99_latency_ms": p99_latency_ms,
+                "jitter_ms": jitter_ms,
+                "packet_loss_pct": packet_loss_pct,
+            }
+        except Exception as exc:
+            logging.error(f"Lỗi trong evaluate_network_physics: {exc}")
+            return {
+                "reward": -5.0, "throughput": 10.0, "goodput": 10.0, "offered_load": 50.0,
+                "p_c": 0.9, "retry_rate": 0.5, "per_phy": 0.5, "eff_sinr_db": 5.0,
+                "eff_rssi_dbm": -75.0, "eff_noise_dbm": -70.0, "chosen_sub_noise_dbm": -70.0,
+                "airtime_next": 0.9, "ofdma_next": 0.2, "p99_latency_ms": 50.0,
+                "jitter_ms": 10.0, "packet_loss_pct": 25.0,
+            }
+
+    @classmethod
+    def compute_optimal_targets(cls, obs: np.ndarray, aqm_enabled: bool = True) -> Tuple[np.ndarray, Dict[str, float]]:
+        """
+        HÀM TÌM NGHIỆM TỐI ƯU TOÀN CỤC (SIMULATOR ORACLE):
+        Trả về tổ hợp hành động 7 chiều tối ưu nhất và bộ chỉ số vật lý tương ứng cho trạng thái obs.
+        """
+        reg = cls._classify_regime(obs)
+        ideal_act = reg["ideal_action"]
+        best_metrics = cls.evaluate_network_physics(obs, ideal_act, aqm_enabled=aqm_enabled)
+        return ideal_act.copy(), best_metrics
+
+    def _sample_ambient_context(self) -> np.ndarray:
+        """Sinh bối cảnh môi trường theo chương trình học phân tầng 4 pha (Stratified Curriculum)."""
+        phase = (self.current_step // 25) % 4
+        self.scenario_mode = phase
+        rssi = float(self.rng.uniform(-88.0, -38.0))
+
+        if phase == 0:  # Bình yên: CH36 sạch, tải thoáng (STA <= 34) -> CH36 + HE80 tối ưu
+            noise = float(self.rng.uniform(-97.0, -87.0))
+            sta = float(self.rng.uniform(4.0, 33.0))
+            retry = float(self.rng.uniform(0.02, 0.11))
+            pc = float(self.rng.uniform(0.03, 0.16))
+            airtime = float(self.rng.uniform(0.12, 0.42))
+            ofdma = float(self.rng.uniform(0.62, 0.90))
+            is_break = 0.0 if self.rng.random() < 0.75 else 1.0
+        elif phase == 1:  # Nhiễu RF đơn kênh tại CH36 (noise trong [-82.5, -73.5] dBm) -> CH40 + HE40 tối ưu
+            noise = float(self.rng.uniform(-82.5, -73.5))
+            sta = float(self.rng.uniform(12.0, 68.0))
+            retry = float(self.rng.uniform(0.16, 0.34))
+            pc = float(self.rng.uniform(0.28, 0.56))
+            airtime = float(self.rng.uniform(0.42, 0.66))
+            ofdma = float(self.rng.uniform(0.38, 0.60))
+            is_break = 0.0 if self.rng.random() < 0.70 else 1.0
+        elif phase == 2:  # Bão Roaming (>85 STA) hoặc Bão UDP Jammer (ofdma < 0.32) trên kênh sạch -> CH36 + HE20 tối ưu
+            noise = float(self.rng.uniform(-95.0, -86.5))
+            if self.rng.random() < 0.58:
+                sta = float(self.rng.uniform(86.0, 210.0))
+                ofdma = float(self.rng.uniform(0.10, 0.30))
+                is_break = 1.0 if self.rng.random() < 0.85 else 0.0
+            else:
+                sta = float(self.rng.uniform(4.0, 24.0))
+                ofdma = float(self.rng.uniform(0.08, 0.26))
+                is_break = 0.0 if self.rng.random() < 0.75 else 1.0
+            retry = float(self.rng.uniform(0.38, 0.65))
+            pc = float(self.rng.uniform(0.42, 0.72))
+            airtime = float(self.rng.uniform(0.75, 0.96))
+        else:  # Nhiễu RF kép đè cả CH36 và CH40 (noise > -71.5 dBm, pc >= 0.65) -> CH44 + HE40 tối ưu
+            noise = float(self.rng.uniform(-70.5, -56.0))
+            sta = float(self.rng.uniform(10.0, 72.0))
+            retry = float(self.rng.uniform(0.24, 0.42))
+            pc = float(self.rng.uniform(0.66, 0.95))
+            airtime = float(self.rng.uniform(0.40, 0.68))
+            ofdma = float(self.rng.uniform(0.12, 0.34))
+            is_break = 1.0 if self.rng.random() < 0.50 else 0.0
+
+        return np.array([rssi, noise, sta, retry, pc, airtime, ofdma, is_break], dtype=np.float32)
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self.current_step = 0
         self.previous_action = None
-        self.scn = sample_scenario(self.rng)
-        self.regime_left = int(self.rng.integers(10, 35))
-        return self._obs(), {}
+        self.current_obs = self._sample_ambient_context()
+        return self.current_obs.copy(), {}
 
-    def step(self, action):
-        action = np.asarray(action, dtype=np.int64).reshape(-1)
-        m = evaluate_actions(self.scn, action[None, :])
-        reward = float(m["reward"][0])
-        info = {k: (float(v[0]) if k != "ideal_action" else v) for k, v in m.items()}
-        info["tier"], info["load_type"] = self.scn.get("tier", -1), self.scn.get("load_type", -1)
-
-        self.previous_action = action.copy()
+    def step(self, action: np.ndarray):
         self.current_step += 1
-        self.regime_left -= 1
-        if self.regime_left <= 0:
-            self._new_regime()
+        metrics = self.evaluate_network_physics(
+            self.current_obs, action, prev_action=self.previous_action, aqm_enabled=self.aqm_enabled
+        )
+        self.previous_action = np.array(action, copy=True)
+
+        # Liên kết nhân quả (s_t, a_t) -> s_{t+1}:
+        # Phản ánh kết quả thực thi hành động a_t vào cả 6 chỉ số động (bao gồm chiều thứ 2 là noise_on_chosen_ch),
+        # đồng thời duy trì dấu vết bối cảnh vật lý của pha hiện tại để chống hiện tượng ping-pong nhảy ngược về kênh nhiễu.
+        ambient_next = self._sample_ambient_context()
+        same_phase = ((self.current_step // 25) % 4) == (((self.current_step - 1) // 25) % 4)
+        if same_phase:
+            phase = (self.current_step // 25) % 4
+            raw_noise_blend = 0.78 * ambient_next[1] + 0.22 * np.clip(metrics["chosen_sub_noise_dbm"], -100.0, -55.0)
+            raw_retry_blend = 0.80 * ambient_next[3] + 0.20 * metrics["retry_rate"]
+            raw_pc_blend = 0.80 * ambient_next[4] + 0.20 * metrics["p_c"]
+            raw_air_blend = 0.80 * ambient_next[5] + 0.20 * metrics["airtime_next"]
+            raw_ofdma_blend = 0.80 * ambient_next[6] + 0.20 * metrics["ofdma_next"]
+
+            if phase == 0:
+                noise_next = float(np.clip(raw_noise_blend, -98.0, -86.5))
+                retry_next = float(np.clip(raw_retry_blend, 0.02, 0.13))
+                pc_next = float(np.clip(raw_pc_blend, 0.03, 0.19))
+                air_next = float(np.clip(raw_air_blend, 0.10, 0.46))
+                ofdma_next = float(np.clip(raw_ofdma_blend, 0.58, 0.92))
+            elif phase == 1:
+                noise_next = float(np.clip(raw_noise_blend, -83.0, -73.0))
+                retry_next = float(np.clip(raw_retry_blend, 0.15, 0.36))
+                pc_next = float(np.clip(raw_pc_blend, 0.26, 0.58))
+                air_next = float(np.clip(raw_air_blend, 0.38, 0.68))
+                ofdma_next = float(np.clip(raw_ofdma_blend, 0.36, 0.62))
+            elif phase == 2:
+                noise_next = float(np.clip(raw_noise_blend, -96.0, -85.5))
+                retry_next = float(np.clip(raw_retry_blend, 0.36, 0.68))
+                pc_next = float(np.clip(raw_pc_blend, 0.40, 0.74))
+                air_next = float(np.clip(raw_air_blend, 0.74, 0.97))
+                ofdma_next = float(np.clip(raw_ofdma_blend, 0.08, 0.32))
+            else:
+                noise_next = float(np.clip(raw_noise_blend, -71.0, -55.0))
+                retry_next = float(np.clip(raw_retry_blend, 0.22, 0.45))
+                pc_next = float(np.clip(raw_pc_blend, 0.64, 0.96))
+                air_next = float(np.clip(raw_air_blend, 0.38, 0.70))
+                ofdma_next = float(np.clip(raw_ofdma_blend, 0.10, 0.35))
+
+            next_obs = np.array(
+                [
+                    float(np.clip(0.80 * ambient_next[0] + 0.20 * metrics["eff_rssi_dbm"], -88.0, -38.0)),
+                    noise_next,
+                    ambient_next[2],
+                    retry_next,
+                    pc_next,
+                    air_next,
+                    ofdma_next,
+                    ambient_next[7],
+                ],
+                dtype=np.float32,
+            )
         else:
-            self._drift()
+            next_obs = ambient_next
 
-        terminated = False
-        truncated = bool(self.current_step >= self.max_steps)
-        return self._obs(), reward, terminated, truncated, info
+        self.current_obs = next_obs
+        terminated = bool(self.current_step >= self.max_steps)
+        return next_obs.copy(), float(metrics["reward"]), terminated, False, metrics
 
-    def simulate_future(self, current_real_state, action) -> float:
-        """HÀM TIÊN TRI (WHAT-IF ENGINE): dự đoán reward nếu áp action lên state 8D thực tế."""
-        try:
-            return float(evaluate_actions(current_real_state, np.asarray(action)[None, :])["reward"][0])
-        except Exception:
-            return 0.0
+    def simulate_future(self, current_real_state: np.ndarray, action: np.ndarray) -> float:
+        """HÀM TIÊN TRI (SIMULATOR ORACLE): Dùng chung 100% lõi evaluate_network_physics với hàm step()."""
+        metrics = self.evaluate_network_physics(
+            current_real_state, action, prev_action=None, aqm_enabled=self.aqm_enabled
+        )
+        return float(metrics["reward"])
 
-    def oracle_action(self, current_real_state):
+    def oracle_action(self, current_real_state: np.ndarray) -> np.ndarray:
         """Hành động tối ưu 7 chiều theo bản sao số."""
-        return evaluate_actions(current_real_state, np.zeros((1, 7), dtype=np.int64))["ideal_action"]
+        opt_act, _ = self.compute_optimal_targets(current_real_state, aqm_enabled=self.aqm_enabled)
+        return opt_act
+
+
+# =====================================================================================
+# 3. LỚP BỌC ĐA HÌNH TỰ NHẬN THỨC PHẦN CỨNG (HARDWARE-AWARE WRAPPER)
+# =====================================================================================
+class HardwareAwareWrapper(gym.ActionWrapper):
+    """
+    Lớp Bọc Đa Hình Tự Nhận Thức Phần Cứng (Polymorphic Hardware-Aware Action Wrapper):
+    - Hoạt động trực tiếp trên không gian 7 chiều MultiDiscrete([3, 3, 7, 12, 2, 5, 2]) của PPO.
+    - Đóng góp trực tiếp vào quá trình huấn luyện PPO ở Bước 3 và triển khai thực tế:
+      + WIFI_6 (IEEE 802.11ax - Xiaomi AX3000T / MediaTek MT7981B): Mở toàn bộ 7 chiều vũ khí RRM.
+      + WIFI_5_AC (IEEE 802.11ac): Hỗ trợ VHT20/40/80, khóa trần VHT-MCS 0..9, tắt OBSS-PD (idx=0), giữ Beamforming.
+      + WIFI_4_LEGACY (IEEE 802.11n - Router cũ mượn đi thi): Khóa băng thông tối đa HT40 (bw<=1),
+        khóa trần HT-MCS 0..7 (mcs<=7), tắt OBSS-PD (idx=0) và tắt Beamforming (bf=0).
+    """
+    SUPPORTED_PROFILES = {
+        "WIFI_6": {
+            "max_bw_idx": 2,       # HE20, HE40, HE80
+            "max_mcs_idx": 11,     # HE-MCS 0..11 (1024-QAM)
+            "allow_obss_pd": True, # Spatial Reuse (-82..-62 dBm)
+            "allow_beamform": True,# SU/MU Beamforming
+            "active_weapons": ["channel", "bandwidth", "tx_power", "mcs_ceiling", "beacon_int", "obss_pd", "beamforming"],
+        },
+        "WIFI_5_AC": {
+            "max_bw_idx": 2,       # VHT20, VHT40, VHT80
+            "max_mcs_idx": 9,      # VHT-MCS 0..9 (256-QAM)
+            "allow_obss_pd": False,
+            "allow_beamform": True,
+            "active_weapons": ["channel", "bandwidth", "tx_power", "mcs_ceiling", "beacon_int", "beamforming"],
+        },
+        "WIFI_4_LEGACY": {
+            "max_bw_idx": 1,       # Chỉ HT20, HT40 (Không có 80MHz)
+            "max_mcs_idx": 7,      # Chỉ HT-MCS 0..7 (64-QAM)
+            "allow_obss_pd": False,
+            "allow_beamform": False,
+            "active_weapons": ["channel", "bandwidth", "tx_power", "mcs_ceiling", "beacon_int"],
+        },
+    }
+
+    def __init__(self, env: gym.Env, hardware_type: str = "WIFI_6", verbose: bool = False):
+        super().__init__(env)
+        self.hardware_type = hardware_type.upper()
+        if self.hardware_type not in self.SUPPORTED_PROFILES:
+            self.hardware_type = "WIFI_6"
+        self.profile = self.SUPPORTED_PROFILES[self.hardware_type]
+        if hasattr(self.env, "hardware_type"):
+            self.env.hardware_type = self.hardware_type
+        if verbose:
+            if self.hardware_type == "WIFI_6":
+                print(f"[+] Đã phát hiện Router Wi-Fi 6 (802.11ax MediaTek). Kích hoạt toàn bộ 7/7 vũ khí RRM.")
+            elif self.hardware_type == "WIFI_5_AC":
+                print(f"[!] Đã phát hiện Router Wi-Fi 5 (802.11ac). Khóa MCS<=9 và cố định OBSS-PD mặc định.")
+            else:
+                print(f"[!] CẢNH BÁO: Đã phát hiện Router Wi-Fi 4 (802.11n Legacy). Kích hoạt chế độ Fallback (BW<=40MHz, MCS<=7, tắt OBSS-PD & Beamforming).")
+
+    def set_hardware_profile(self, hardware_type: str):
+        self.hardware_type = hardware_type.upper()
+        self.profile = self.SUPPORTED_PROFILES[self.hardware_type]
+        if hasattr(self.env, "hardware_type"):
+            self.env.hardware_type = self.hardware_type
+
+    def action(self, action: np.ndarray) -> np.ndarray:
+        """Ánh xạ và kẹp an toàn vector 7 chiều từ PPO sang giới hạn vật lý của phần cứng thực tế."""
+        act = np.array(action, dtype=np.int64, copy=True).reshape(-1)
+        act[0] = int(np.clip(act[0], 0, 2))
+        act[1] = int(np.clip(act[1], 0, self.profile["max_bw_idx"]))
+        act[2] = int(np.clip(act[2], 0, 6))
+        act[3] = int(np.clip(act[3], 0, self.profile["max_mcs_idx"]))
+        act[4] = int(np.clip(act[4], 0, 1))
+        act[5] = int(np.clip(act[5], 0, 4)) if self.profile["allow_obss_pd"] else 0
+        act[6] = int(np.clip(act[6], 0, 1)) if self.profile["allow_beamform"] else 0
+        return act
+
+    def simulate_future(self, current_real_state: np.ndarray, action: np.ndarray) -> float:
+        safe_act = self.action(action)
+        return self.env.simulate_future(current_real_state, safe_act)
 
 
 # Alias tương thích ngược cho Bước 1 trong Notebook
