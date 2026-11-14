@@ -292,70 +292,70 @@ Hệ thống mô hình hóa bài toán điều phối tài nguyên không dây t
 +---------------------------------------------------------------------------------------------------+
 |                                          MÔI TRƯỜNG MẠNG THỰC TẾ                                  |
 |                                                                                                   |
-|  Vector Quan sát Trạng thái S_t thuộc Box(8):                                                     |
-|  [ avg_rssi,  p_c,  retry_rate,  airtime_util,  sta_count,  hour,  minute,  is_break_time ]      |
+|  Vector Quan sát Trạng thái S_t thuộc Box(8) — Dual Sensing (MAC + PHY Preamble Sensing):          |
+|  [ avg_rssi,  noise_floor,  sta_count,  retry_rate,  p_c,  airtime_util,  ofdma_ratio,  is_break ] |
 +---------------------------------------------------------------------------------------------------+
                    |                                                                  ^
                    | Quan sát S_t                                                     | Thực thi A_t
                    v                                                                  | (Atomic SSH)
 +-------------------------------------+                         +-----------------------------------+
-|       TÁC TỬ PPO (ACTOR-CRITIC)     |                         | BỘ MÁY THỰC THI CHIẾN THUẬT       |
-|                                     |                         | - Kênh: 36, 40, 44                |
+|       TÁC TỬ PPO (ACTOR-CRITIC)     |                         | BỘ MÁY THỰC THI CHIẾN THUẬT 7D    |
+|                                     |                         | - Kênh: 36, 40, 44 (1, 6, 11)     |
 |  Mạng Neural sinh phân phối hành    |--- Hành động A_t ------>| - Băng thông: HE20, HE40, HE80    |
-|  động A_t theo chính sách pi_theta  |    MultiDiscrete(7)     | - Công suất Tx: 8 - 14 dBm        |
-|                                     |                         | - AQL + FQ-CoDel + Beamforming    |
+|  động A_t theo chính sách pi_theta  |    MultiDiscrete(7)     | - Tx Power: 14..20 dBm & MCS 0..11|
+|                                     |                         | - Beacon, OBSS-PD, Beamforming    |
 +-------------------------------------+                         +-----------------------------------+
                    |
                    | Tính toán Phần thưởng R_t
                    v
 +---------------------------------------------------------------------------------------------------+
-|  HÀM THƯỞNG: R_t = Throughput_norm - 5.0*(p_c^2) + Beacon_bonus + Action_Smoothness_Penalty       |
+|  HÀM THƯỞNG: R_t = Throughput_score - 3.0*(p_c^2) - SLA_Penalty + 7D_CrossLayer_Alignment          |
 +---------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-### 1. Không gian Trạng thái ($\mathcal{S} \in \text{Box}(8)$)
+### 1. Không gian Trạng thái ($\mathcal{S} \in \text{Box}(8)$) — Dual Sensing (MAC + PHY Preamble)
 
-Được chuẩn hóa chính xác trong [`src/envs/real_router_env.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/envs/real_router_env.py#L36-L39) và [`src/rl_agent/deploy_hil_agent.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/rl_agent/deploy_hil_agent.py#L79-L94), bao gồm **8 tham số thực tế**:
+Được chuẩn hóa đồng bộ trong [`src/envs/digital_twin_env.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/envs/digital_twin_env.py), [`src/envs/real_router_env.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/envs/real_router_env.py) và [`src/rl_agent/deploy_hil_agent.py`](file:///home/chigguaymeovang300475/KHKT_2026_WIFI_RL/src/rl_agent/deploy_hil_agent.py), kết hợp **MAC-Layer Sensing** và **PHY Preamble Sensing (US Patent 10,637,706 B2)**:
 
 $$
-\mathcal{S}_t = \Big[ \text{RSSI}_{\text{avg}},\ p_c,\ \text{RetryRate},\ \text{AirtimeUtil},\ \text{STACount},\ \text{Hour},\ \text{Minute},\ \text{IsBreakTime} \Big]
+\mathcal{S}_t = \Big[ \text{RSSI}_{\text{avg}},\ \text{NoiseFloor},\ \text{STACount},\ \text{RetryRate},\ p_c,\ \text{AirtimeUtil},\ \text{OFDMARatio},\ \text{IsBreakTime} \Big]
 $$
 
-| STT | Tên tham số | Khoảng giới hạn `[Min, Max]` | Ý nghĩa vật lý |
+| STT | Tên tham số | Khoảng giới hạn `[Min, Max]` | Tầng cảm biến & Ý nghĩa vật lý |
 |:---:|---|:---:|---|
-| **0** | `avg_rssi` | `[-90.0, -30.0]` dBm | Cường độ tín hiệu trung bình của các trạm đang kết nối. |
-| **1** | $p_c$ | `[0.0, 1.0]` | Xác suất va chạm tầng MAC (ước lượng từ `tx_failed` và bão lưu lượng). |
-| **2** | `retry_rate` | `[0.0, 1.0]` | Tỷ lệ truyền lại khung tin do lỗi truyền sóng vô tuyến. |
-| **3** | `airtime_util` | `[0.0, 1.0]` | Độ bận kênh truyền (CCA) kết hợp lưu lượng gói tin (PPS). |
-| **4** | `sta_count` | `[0, 300]` | Số lượng thiết bị Client đang kết nối tới AP. |
-| **5** | `hour` | `[0, 23]` | Giờ trong ngày (nắm bắt chu kỳ sinh hoạt trường học). |
-| **6** | `minute` | `[0, 59]` | Phút trong giờ (phân biệt tiết học với giờ nghỉ). |
-| **7** | `is_break_time` | `[0, 1]` | Cờ giờ giải lao ($1$ nếu phút $\in [45, 59]$, ngược lại $0$). |
+| **0** | `avg_rssi` | `[-90.0, -30.0]` dBm | **MAC**: Cường độ tín hiệu thu trung bình của các trạm đang kết nối. |
+| **1** | `noise_floor` | `[-105.0, -50.0]` dBm | **PHY Preamble**: Nhiễu nền vô tuyến trích xuất từ Radiotap/Survey. |
+| **2** | `sta_count` | `[0.0, 300.0]` | **MAC**: Số lượng thiết bị Client đang kết nối tới AP. |
+| **3** | `retry_rate` | `[0.0, 1.0]` | **MAC**: Tỷ lệ truyền lại khung tin MPDU do lỗi kênh/suy hao. |
+| **4** | $p_c$ | `[0.0, 1.0]` | **MAC**: Xác suất va chạm gói tin CSMA/CA. |
+| **5** | `airtime_util` | `[0.0, 1.0]` | **MAC**: Độ bận kênh truyền (CCA Busy Ratio). |
+| **6** | `ofdma_ratio` | `[0.0, 1.0]` | **PHY Preamble**: Tỷ lệ khung đa truy cập HE-MU OFDMA ($4\,\mu\text{s}$ preamble). |
+| **7** | `is_break_time` | `[0.0, 1.0]` | **Context**: Cờ ngữ cảnh giờ giải lao / chuyển tiết ($1$ hoặc $0$). |
 
 ---
 
 ### 2. Không gian Hành động ($\mathcal{A} \in \text{MultiDiscrete}$)
 
-Mô hình xuất ra vector hành động gồm 7 thành phần:
+Mô hình xuất ra vector hành động gồm 7 thành phần ($3 \times 3 \times 7 \times 12 \times 2 \times 5 \times 2 = 15,120$ cấu hình):
 $$\mathcal{A} = \text{MultiDiscrete}([3,\, 3,\, 7,\, 12,\, 2,\, 5,\, 2])$$
 
 1. **Lựa chọn Kênh (`action[0]`, 3 giá trị):**  
    - Băng tần 5GHz: `[36, 40, 44]`
    - Băng tần 2.4GHz: `[1, 6, 11]`
 2. **Độ rộng Băng thông (`action[1]`, 3 giá trị):**  
-   - `["HE20", "HE40", "HE80"]` (co dãn linh hoạt: co về HE20 khi bị nhiễu/bão UDP, mở rộng HE80 khi kênh sạch).
+   - `["HE20", "HE40", "HE80"]` (co về `HE20` khi bão Roaming / bão UDP, giữ `HE40` khi lớp học tải vừa, mở rộng `HE80` khi kênh thoáng).
 3. **Công suất Phát Tx (`action[2]`, 7 giá trị):**  
-   - Mức công suất: $P_{\text{tx}} = 8 + \text{action}[2]$ (từ $8\,\text{dBm}$ đến $14\,\text{dBm}$).
+   - Mức công suất: $P_{\text{tx}} = 14 + \text{action}[2]$ (từ $14\,\text{dBm}$ đến $20\,\text{dBm}$, áp nóng qua `iw` không làm rớt kết nối).
 4. **Trần điều chế MCS (`action[3]`, 12 giá trị):**  
-   - Giới hạn MCS Index từ 0 đến 11.
+   - Giới hạn trần HE-MCS từ 0 đến 11 theo SNR thực tế để chống Rate Anomaly.
 5. **Khoảng cách phát Beacon (`action[4]`, 2 giá trị):**  
-   - `[80, 300]` ms ($80\,\text{ms}$ khi giờ ra chơi đông người để kết nối nhanh; $300\,\text{ms}$ khi trong giờ học để tiết kiệm Airtime).
+   - `[80, 300]` ms ($80\,\text{ms}$ khi giờ ra chơi đông người để hỗ trợ 802.11r roaming nhanh; $300\,\text{ms}$ trong giờ học để tiết kiệm Airtime).
 6. **Mức tái sử dụng không gian OBSS-PD (`action[5]`, 5 giá trị):**  
-   - Điều chỉnh ngưỡng nhạy cảm năng lượng ngoài BSS.
+   - Ngưỡng Spatial Reuse `[-82, -77, -72, -67, -62]` dBm (`he_spr_non_srg_obss_pd_max_offset` từ $0$ đến $20\,\text{dB}$).
 7. **Kích hoạt Beamforming (`action[6]`, 2 giá trị):**  
-   - `[0, 1]` (Bật/tắt `he_su_beamformer`).
+   - `[0, 1]` (Bật `he_su_beamformer` khi $\le 65$ STA để tăng $+3.5\,\text{dB}$ SNR; tắt khi bão Roaming để cắt giảm chi phí gói Sounding).
 
 ---
 
