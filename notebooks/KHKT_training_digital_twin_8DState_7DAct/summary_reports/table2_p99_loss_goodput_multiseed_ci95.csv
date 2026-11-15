@@ -1,7 +1,7 @@
 Seed,Latency P99 Dual-Sensing (M),Latency P99 MAC-only sensing,Latency P99 Heuristic,Latency P99 Static N,Packet loss trung bình Dual-Sensing (M),Packet loss trung bình MAC-only sensing,Packet loss trung bình Heuristic,Packet loss trung bình SLA Static N,Goodput trung bình Dual-Sensing (M),Goodput trung bình MAC-only sensing,Goodput trung bình Heuristic,Goodput trung bình Static N
-seed 11,21.39 ms,89.45 ms,91.47 ms,764.25 ms,0.38%,40.38%,58.96%,85.01%,80.16 Mbps,52.20 Mbps,34.56 Mbps,26.97 Mbps
-seed 22,22.53 ms,89.59 ms,91.42 ms,772.59 ms,0.39%,40.50%,58.69%,86.55%,78.81 Mbps,50.33 Mbps,35.29 Mbps,26.30 Mbps
-seed 33,27.05 ms,89.20 ms,91.32 ms,768.55 ms,0.43%,40.65%,59.70%,87.29%,75.92 Mbps,49.74 Mbps,33.08 Mbps,24.01 Mbps
-seed 44,14.57 ms,89.24 ms,91.44 ms,773.80 ms,0.37%,39.92%,60.41%,86.97%,78.87 Mbps,50.74 Mbps,35.60 Mbps,26.24 Mbps
-seed 55,13.97 ms,88.81 ms,91.01 ms,770.02 ms,0.30%,38.56%,55.03%,85.51%,82.54 Mbps,54.52 Mbps,40.38 Mbps,27.41 Mbps
-Trung bình ± 95% CI,19.90 ± 6.91 ms,89.26 ± 0.37 ms,91.33 ± 0.23 ms,769.84 ± 4.65 ms,0.37 ± 0.06%,40.00 ± 1.06%,58.56 ± 2.59%,86.27 ± 1.21%,79.26 ± 2.98 Mbps,51.51 ± 2.38 Mbps,35.78 ± 3.41 Mbps,26.18 ± 1.63 Mbps
+seed 11,13.39 ms,89.47 ms,91.47 ms,764.25 ms,0.30%,37.19%,58.96%,85.01%,80.58 Mbps,52.62 Mbps,34.56 Mbps,26.97 Mbps
+seed 22,15.29 ms,89.50 ms,91.45 ms,772.56 ms,0.37%,41.02%,58.69%,86.55%,79.04 Mbps,50.43 Mbps,35.29 Mbps,26.30 Mbps
+seed 33,23.95 ms,89.19 ms,91.28 ms,768.40 ms,0.40%,39.41%,59.70%,87.29%,75.70 Mbps,47.80 Mbps,33.08 Mbps,24.01 Mbps
+seed 44,13.18 ms,89.25 ms,91.44 ms,773.80 ms,0.31%,38.51%,60.41%,86.97%,79.15 Mbps,48.46 Mbps,35.60 Mbps,26.24 Mbps
+seed 55,12.71 ms,88.81 ms,91.01 ms,770.02 ms,0.24%,41.47%,55.03%,85.51%,82.79 Mbps,51.82 Mbps,40.38 Mbps,27.41 Mbps
+Trung bình ± 95% CI,15.71 ± 5.85 ms,89.24 ± 0.35 ms,91.33 ± 0.24 ms,769.81 ± 4.66 ms,0.32 ± 0.08%,39.52 ± 2.20%,58.56 ± 2.59%,86.27 ± 1.21%,79.45 ± 3.21 Mbps,50.23 ± 2.58 Mbps,35.78 ± 3.41 Mbps,26.18 ± 1.63 Mbps
