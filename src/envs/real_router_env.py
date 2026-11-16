@@ -32,7 +32,7 @@ class RealRouterEnv(gym.Env):
         if not self.target_bssid:
             logging.warning(f"Chưa map được MAC cho IP {target_ap_ip}. Fine-tune có thể đọc sai State!")
 
-        self.action_space = spaces.MultiDiscrete([3, 3, 7, 12, 2, 5, 2])
+        self.action_space = spaces.MultiDiscrete([9, 3, 7, 12, 2, 5, 2])
         self.observation_space = spaces.Box(
             low=np.array([-90.0, -105.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
             high=np.array([-30.0, -50.0, 300.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
@@ -99,15 +99,16 @@ class RealRouterEnv(gym.Env):
     def step(self, action):
         self.current_step += 1
 
-        CHANNELS = [36, 40, 44] if self.target_radio == "radio1" else [1, 6, 11]
+        CHANNELS = [36, 40, 44, 48, 149, 153, 157, 161, 165] if self.target_radio == "radio1" else [1, 6, 11]
         BANDWIDTHS = ["HE20", "HE40", "HE80"] if self.target_radio == "radio1" else ["HE20", "HE40", "HE40"]
         BEACON_INTS = [80, 300]
 
-        target_channel = CHANNELS[action[0]]
-        target_bw = BANDWIDTHS[action[1]]
-        target_tx = 8 + action[2]
-        target_beacon = BEACON_INTS[action[4]]
-        target_beamform = True if action[6] == 1 else False
+        ch_idx = int(np.clip(action[0], 0, len(CHANNELS) - 1))
+        target_channel = CHANNELS[ch_idx]
+        target_bw = "HE20" if (target_channel == 165 and action[1] > 0) else BANDWIDTHS[int(np.clip(action[1], 0, 2))]
+        target_tx = 14 + int(np.clip(action[2], 0, 6))
+        target_beacon = BEACON_INTS[int(np.clip(action[4], 0, 1))]
+        target_beamform = True if int(action[6]) == 1 else False
 
         logging.info(
             f"Fine-Tuning: Đang thử nghiệm CH={target_channel}, BW={target_bw}, "
