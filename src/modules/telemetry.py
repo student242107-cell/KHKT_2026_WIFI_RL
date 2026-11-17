@@ -16,7 +16,7 @@ from scapy.layers.dot11 import Dot11, Dot11Beacon, RadioTap
 
 load_dotenv()
 
-CHANNELS = (1, 6, 11, 36, 40, 44, 48)
+CHANNELS = (1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165)
 CHANNEL_SCAN_SECONDS = 30
 CHANNEL_DWELL_SECONDS = 0.5
 HISTORY_COLUMNS = [
