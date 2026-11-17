@@ -504,8 +504,10 @@ class UltimateDigitalTwinEnv(gym.Env):
             rssi_compensated = rssi + 0.65 * (tx_power_dbm - 17.0) - freq_loss_db - tx_underpower_pen_db - 0.35 * tx_overdrive_pen_db
 
             is_break_flag = (int(round(is_break)) == 1)
-            is_csi_aging_regime = ((sta > 85.0) and (retry_obs > 0.36)) or (
-                is_break_flag and (sta > 60.0) and (retry_obs > 0.32)
+            is_csi_aging_regime = (
+                (sta > 95.0)
+                or (is_break_flag and (sta > 58.0))
+                or ((sta > 70.0) and (retry_obs > 0.30))
             )
             if bf_idx == 1:
                 bf_gain_db = -2.0 if is_csi_aging_regime else 2.8
@@ -786,8 +788,10 @@ class UltimateDigitalTwinEnv(gym.Env):
         obss_base = int(np.clip(np.round((eff_ofdma_est - 0.12) / 0.16), 0, 4))
         obss_cands = sorted(list(set([max(0, obss_base - 1), obss_base, min(4, obss_base + 1)])))
         bcn_opt = 0 if int(round(is_break)) == 1 else 1
-        is_csi_aging = ((sta > 85.0) and (retry_obs > 0.36)) or (
-            (int(round(is_break)) == 1) and (sta > 60.0) and (retry_obs > 0.32)
+        is_csi_aging = (
+            (sta > 95.0)
+            or ((int(round(is_break)) == 1) and (sta > 58.0))
+            or ((sta > 70.0) and (retry_obs > 0.30))
         )
         bf_opt = 0 if is_csi_aging else 1
 
