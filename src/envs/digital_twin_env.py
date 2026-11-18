@@ -227,6 +227,8 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
       3) Khi kênh hiện tại bị nhiễu (`noise > -84.0 dBm`) hoặc sập MAC kéo dài qua ngưỡng dwell,
          mở cổng để PPO thoát kênh và đưa kênh vừa hỏng vào `quarantine` trong `quarantine_steps` bước.
     """
+    _ESCAPE_ROTATION = (4, 0, 6, 2, 5, 1, 7, 3, 8)
+
     def __init__(
         self,
         env: gym.Env,
@@ -245,6 +247,7 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
         self.step_count = 0
         self.last_switch_step = -100
         self.current_ch = 0
+        self.escape_cursor = 0
         self.quarantine_until: Dict[int, int] = {}
 
     def reset(self, **kwargs):
@@ -254,6 +257,42 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
         self.current_ch = int(getattr(self.env.unwrapped, "current_ch", 0))
         self.quarantine_until = {}
         return obs, info
+
+    def _quarantine_channel_and_cluster(self, ch_idx: int, noise_obs: float) -> None:
+        """Cách ly nhân quả kênh đang nhiễu và cụm gộp 40/80 MHz lân cận khi phát hiện nhiễu băng rộng."""
+        self.quarantine_until[ch_idx] = self.step_count + self.quarantine_steps
+        if noise_obs > -80.0 and ch_idx < 8:
+            partner_40 = ch_idx ^ 1
+            self.quarantine_until[partner_40] = max(
+                self.quarantine_until.get(partner_40, 0),
+                self.step_count + max(6, self.quarantine_steps // 2),
+            )
+        if noise_obs > -71.5 and ch_idx < 8:
+            block_range = range(0, 4) if ch_idx < 4 else range(4, 8)
+            exp_block = self.step_count + max(8, self.quarantine_steps - 2)
+            for c_b in block_range:
+                self.quarantine_until[c_b] = max(self.quarantine_until.get(c_b, 0), exp_block)
+
+    def _pick_rotated_escape_channel(
+        self, allowed: list, proposed_ch: int, bw_req: int, sta_obs: float
+    ) -> int:
+        self.escape_cursor = (self.escape_cursor + 1) % len(self._ESCAPE_ROTATION)
+        rot_order = [
+            self._ESCAPE_ROTATION[(self.escape_cursor + i) % len(self._ESCAPE_ROTATION)]
+            for i in range(len(self._ESCAPE_ROTATION))
+        ]
+        allowed_rot = [c for c in rot_order if c in allowed and c != self.current_ch]
+        if not allowed_rot:
+            allowed_rot = [c for c in allowed if c != self.current_ch] or allowed
+        # Khi bão tải mật độ cao (cần HE20), ưu tiên định kỳ khám phá cả CH165 (idx 8)
+        if (sta_obs > 78.0 or bw_req == 0) and (8 in allowed_rot) and (self.escape_cursor % 3 == 0):
+            return 8
+        # Khi cần băng thông rộng HE40/HE80, ưu tiên kênh 0..7 hỗ trợ gộp kênh
+        if bw_req > 0:
+            wide_cands = [c for c in allowed_rot if c < 8]
+            if wide_cands:
+                return wide_cands[0]
+        return allowed_rot[0]
 
     def filter_channel_action(self, obs_seen: np.ndarray, action: np.ndarray) -> Tuple[np.ndarray, bool]:
         act = np.array(action, dtype=np.int64, copy=True).reshape(-1)
@@ -272,7 +311,7 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
         rf_jammed = (noise_obs > self.hold_noise_thresh)
         mac_collapsed = dwell_elapsed and (pc_obs >= self.hold_pc_thresh) and (retry_obs >= self.hold_retry_thresh)
         need_escape = rf_jammed or mac_collapsed
-        stuck_on_ch165 = (self.current_ch == 8 and sta_obs < 45.0 and ofdma_obs >= 0.45 and int(act[1]) > 0)
+        stuck_on_ch165 = (self.current_ch == 8 and sta_obs <= 72.0 and ofdma_obs >= 0.35 and int(act[1]) > 0)
         held_channel = False
 
         if proposed_ch != self.current_ch:
@@ -280,20 +319,21 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
                 act[0] = self.current_ch
                 held_channel = True
             elif need_escape:
-                self.quarantine_until[self.current_ch] = self.step_count + self.quarantine_steps
+                self._quarantine_channel_and_cluster(self.current_ch, noise_obs)
 
-        # Nếu đứng trên kênh đang nhiễu hoặc đề xuất trúng kênh đang bị cách ly -> tìm kênh thay thế hợp lệ
-        if need_escape and ((act[0] in self.quarantine_until) or (act[0] == self.current_ch)):
-            if self.current_ch not in self.quarantine_until:
-                self.quarantine_until[self.current_ch] = self.step_count + self.quarantine_steps
+        # Nếu đứng trên kênh đang nhiễu, cần rời CH165, hoặc đề xuất trúng kênh đang bị cách ly -> chọn kênh thoát xoay vòng
+        if need_escape or stuck_on_ch165:
+            if need_escape and (self.current_ch not in self.quarantine_until):
+                self._quarantine_channel_and_cluster(self.current_ch, noise_obs)
             allowed = [c for c in range(len(NON_DFS_5G_CHANNELS)) if c not in self.quarantine_until]
-            if allowed:
-                if act[0] not in allowed:
-                    act[0] = allowed[proposed_ch % len(allowed)]
-            else:
+            if not allowed:
                 oldest_ch = min(self.quarantine_until.items(), key=lambda kv: kv[1])[0]
                 self.quarantine_until.pop(oldest_ch, None)
-                act[0] = oldest_ch
+                allowed = [oldest_ch]
+            if (act[0] not in allowed) or (act[0] == self.current_ch) or (need_escape and (self.escape_cursor % 2 == 0)):
+                act[0] = self._pick_rotated_escape_channel(allowed, proposed_ch, int(act[1]), sta_obs)
+            else:
+                self.escape_cursor = (self.escape_cursor + 1) % len(self._ESCAPE_ROTATION)
         elif (not need_escape) and (act[0] in self.quarantine_until) and (act[0] != self.current_ch):
             # Bảo vệ không nhảy từ kênh sạch sang kênh vẫn đang trong thời hạn cách ly
             act[0] = self.current_ch
@@ -480,16 +520,26 @@ class UltimateDigitalTwinEnv(gym.Env):
             actual_bw_idx = 0 if actual_htmode == "HE20" else (1 if actual_htmode == "HE40" else 2)
 
             if actual_htmode == "HE20":
+                occ_max_noise_dbm = chosen_sub_noise_dbm
                 eff_noise_dbm = chosen_sub_noise_dbm - 2.2
                 bw_tonal_factor = 1.00
             elif actual_htmode == "HE40":
                 i0, i1 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]]
-                eff_noise_dbm = cls._dbm_sum(float(spectrum_noise[i0]), float(spectrum_noise[i1])) + 0.5
+                n0, n1 = float(spectrum_noise[i0]), float(spectrum_noise[i1])
+                occ_max_noise_dbm = n0 if n0 >= n1 else n1
+                eff_noise_dbm = cls._dbm_sum(n0, n1) + 0.5
                 bw_tonal_factor = 2.04
             else:  # HE80 (4 kênh 20 MHz liên tiếp)
                 i0, i1, i2, i3 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]], ch_map[occupied_subs[2]], ch_map[occupied_subs[3]]
-                n_pair1 = cls._dbm_sum(float(spectrum_noise[i0]), float(spectrum_noise[i1]))
-                n_pair2 = cls._dbm_sum(float(spectrum_noise[i2]), float(spectrum_noise[i3]))
+                n0, n1, n2, n3 = (
+                    float(spectrum_noise[i0]),
+                    float(spectrum_noise[i1]),
+                    float(spectrum_noise[i2]),
+                    float(spectrum_noise[i3]),
+                )
+                occ_max_noise_dbm = max(n0, n1, n2, n3)
+                n_pair1 = cls._dbm_sum(n0, n1)
+                n_pair2 = cls._dbm_sum(n2, n3)
                 eff_noise_dbm = cls._dbm_sum(n_pair1, n_pair2) + 2.0
                 bw_tonal_factor = 3.96
 
@@ -498,9 +548,10 @@ class UltimateDigitalTwinEnv(gym.Env):
             tx_power_dbm = 14.0 + float(tx_idx)
             freq_loss_db = cls._FREQ_LOSS_TUPLE[ch_idx]
 
-            target_tx_dbm = 14.0 + clip((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0), 0.0, 6.0)
-            tx_underpower_pen_db = max(0.0, target_tx_dbm - tx_power_dbm) * 1.45
-            tx_overdrive_pen_db = max(0.0, tx_power_dbm - target_tx_dbm) * 1.35
+            opt_tx_idx = float(int(clip(round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0.0, 6.0)))
+            target_tx_dbm = 14.0 + opt_tx_idx
+            tx_underpower_pen_db = max(0.0, target_tx_dbm - tx_power_dbm) * 1.55
+            tx_overdrive_pen_db = max(0.0, tx_power_dbm - target_tx_dbm) * 1.45
             rssi_compensated = rssi + 0.65 * (tx_power_dbm - 17.0) - freq_loss_db - tx_underpower_pen_db - 0.35 * tx_overdrive_pen_db
 
             is_break_flag = (int(round(is_break)) == 1)
@@ -516,19 +567,22 @@ class UltimateDigitalTwinEnv(gym.Env):
                 bf_gain_db = 1.2 if is_csi_aging_regime else -1.1
                 csi_sounding_overhead = 0.0
 
-            escaped_rf_jam = (noise_obs > -84.0) and (chosen_sub_noise_dbm <= -88.0)
+            escaped_rf_jam = (noise_obs > -84.0) and (occ_max_noise_dbm <= -88.0)
             eff_airtime_in = airtime_obs * 0.38 if escaped_rf_jam else airtime_obs
             eff_ofdma_raw = ofdma_obs if base_ofdma_capacity is None else float(base_ofdma_capacity)
             eff_ofdma_base = max(eff_ofdma_raw, 0.52) if (base_ofdma_capacity is None and escaped_rf_jam) else eff_ofdma_raw
 
-            opt_obss_level = clip((eff_ofdma_base - 0.12) / 0.16, 0.0, 4.0)
-            obss_interference_leak_db = max(0.0, float(obss_idx) - opt_obss_level) * 1.70
-            obss_cca_deferral_pen_db = max(0.0, opt_obss_level - float(obss_idx)) * 1.30
+            # Điểm tối ưu OBSS-PD và chế độ tải neo trực tiếp vào biến quan sát `obs` để không rò rỉ biến ẩn
+            opt_obss_level = float(int(clip(round((ofdma_obs - 0.12) / 0.16), 0.0, 4.0)))
+            obss_interference_leak_db = max(0.0, float(obss_idx) - opt_obss_level) * 1.75
+            obss_cca_deferral_pen_db = max(0.0, opt_obss_level - float(obss_idx)) * 1.45
 
-            is_heavy_load = (sta > 78.0) or ((eff_airtime_in > 0.72 and eff_ofdma_base < 0.36) or (eff_ofdma_base < 0.28 and (not escaped_rf_jam) and pc_obs > 0.42))
+            is_heavy_load = (sta > 78.0) or ((airtime_obs > 0.76) and (ofdma_obs < 0.32))
             is_medium_load = (not is_heavy_load) and (32.0 < sta <= 78.0)
-            if chosen_sub_noise_dbm <= -88.0:
-                fading_margin_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - eff_ofdma_base)
+            opt_bw_idx = 0 if (is_heavy_load or ch_idx == 8) else (1 if is_medium_load else 2)
+
+            if occ_max_noise_dbm <= -88.0:
+                fading_margin_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - ofdma_obs)
             else:
                 fading_margin_db = (
                     (4.5 if is_heavy_load else (2.2 if is_medium_load else 0.8))
@@ -541,28 +595,46 @@ class UltimateDigitalTwinEnv(gym.Env):
             )
 
             # 3. TẦNG ĐIỀU CHẾ THÍCH ỨNG MINSTREL-HT (AMC VỚI ĐIỂM NGỌT PER <= 1.5%)
-            safe_mcs_idx = cls._mcs_lookup(eff_sinr_db - 6.5)
+            clean_ref_noise = -96.4 if opt_bw_idx == 0 else (-90.7 if opt_bw_idx == 1 else -86.2)
+            ref_fading_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - ofdma_obs)
+            link_sinr_est = (
+                rssi
+                + 0.65 * (target_tx_dbm - 17.0)
+                + (1.2 if is_csi_aging_regime else 2.8)
+                - clean_ref_noise
+                - ref_fading_db
+            )
+            safe_mcs_idx = cls._mcs_lookup(link_sinr_est - 6.5)
+
             dynamic_fading_risk = (
-                (chosen_sub_noise_dbm > -86.0)
+                (occ_max_noise_dbm > -86.0)
                 or ((not escaped_rf_jam) and retry_obs > 0.22)
                 or (sta > 55.0)
                 or ((not escaped_rf_jam) and pc_obs > 0.32)
             )
-            severe_fading_risk = (chosen_sub_noise_dbm > -78.0) or ((not escaped_rf_jam) and (retry_obs > 0.38 or pc_obs > 0.50))
+            severe_fading_risk = (occ_max_noise_dbm > -78.0) or ((not escaped_rf_jam) and (retry_obs > 0.38 or pc_obs > 0.50))
             minstrel_overshoot = 2 if severe_fading_risk else (1 if dynamic_fading_risk else 0)
             minstrel_natural_mcs = min(11, safe_mcs_idx + minstrel_overshoot)
             operating_mcs_idx = min(mcs_ceiling_idx, minstrel_natural_mcs)
+
+            mcs_delta = abs(mcs_ceiling_idx - safe_mcs_idx)
+            mcs_over_ceiling = max(0, mcs_ceiling_idx - safe_mcs_idx)
+            mcs_under_ceiling = max(0, safe_mcs_idx - mcs_ceiling_idx)
 
             req_sinr_db = cls._MCS_REQ_SINR_TUPLE[operating_mcs_idx]
             sinr_margin_db = eff_sinr_db - req_sinr_db
             exp_arg = clip(0.95 * (sinr_margin_db - 2.1), -60.0, 60.0)
             per_sigmoid = 1.0 / (1.0 + math.exp(exp_arg))
             mcs_overreach_db = max(0.0, (req_sinr_db + 5.5) - eff_sinr_db)
-            per_phy = clip(per_sigmoid + 0.032 * (mcs_overreach_db * mcs_overreach_db), 0.002, 0.96)
+            per_phy = clip(
+                per_sigmoid + 0.032 * (mcs_overreach_db * mcs_overreach_db) + 0.015 * mcs_over_ceiling,
+                0.002,
+                0.96,
+            )
 
             if is_heavy_load:
                 bw_contention_factor = 0.44 if actual_bw_idx == 0 else (1.58 if actual_bw_idx == 1 else 2.35)
-            elif is_medium_load or (chosen_sub_noise_dbm > -86.0):
+            elif is_medium_load or (occ_max_noise_dbm > -86.0):
                 bw_contention_factor = 1.12 if actual_bw_idx == 0 else (0.52 if actual_bw_idx == 1 else 1.72)
             else:
                 bw_contention_factor = 1.38 if actual_bw_idx == 0 else (0.95 if actual_bw_idx == 1 else 0.32)
@@ -571,7 +643,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             ofdma_deficit = max(0.0, 0.62 - eff_ofdma_base)
             ofdma_spike_pen = 0.22 if (eff_ofdma_base < 0.28 and (actual_bw_idx != 0 or (bf_idx != 1 and not is_csi_aging_regime))) else 0.0
 
-            if chosen_sub_noise_dbm <= -88.0:
+            if occ_max_noise_dbm <= -88.0:
                 load_pressure = clip((sta / 155.0) + 0.20 * eff_airtime_in + 0.26 * ofdma_deficit, 0.05, 0.95)
             else:
                 load_pressure = clip((sta / 135.0) + 0.40 * eff_airtime_in + 0.40 * ofdma_deficit, 0.06, 1.30)
@@ -620,7 +692,6 @@ class UltimateDigitalTwinEnv(gym.Env):
                 base_demand = clip(20.0 + sta * 0.05 + 4.0 * eff_airtime_in, 22.0, 34.0)
             offered_load_mbps = base_demand * mcs_demand_scale * float(demand_scale)
 
-            goodput_mbps = min(offered_load_mbps, service_capacity_mbps)
             airtime_next = clip(offered_load_mbps / max(service_capacity_mbps, 10.0), 0.08, 0.99)
 
             rho = offered_load_mbps / max(service_capacity_mbps, 8.0)
@@ -643,21 +714,29 @@ class UltimateDigitalTwinEnv(gym.Env):
             packet_loss_ratio = clip(mac_exhaust_loss + congestion_drop, 0.0, 1.0)
             packet_loss_pct = packet_loss_ratio * 100.0
 
+            # Goodput chuẩn IETF RFC 2647: trừ phần suy hao do mất gói & nghẽn hàng đợi
+            raw_goodput_mbps = min(offered_load_mbps, service_capacity_mbps)
+            tcp_qoe_factor = (1.0 - packet_loss_ratio) * (
+                1.0 - 0.16 * min(1.0, max(0.0, p99_latency_ms - 15.0) / 85.0)
+            )
+            goodput_mbps = raw_goodput_mbps * max(0.15, tcp_qoe_factor)
+
             # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU VẬT LÝ THUẦN TÚY
             goodput_fulfillment = goodput_mbps / max(offered_load_mbps, 1.0)
             spectral_efficiency_score = 0.65 * (service_capacity_mbps / max(offered_load_mbps, 20.0))
             tput_score = 2.15 * goodput_fulfillment + 0.72 * (goodput_mbps / 100.0) + min(1.05, spectral_efficiency_score)
 
-            amc_stability_bonus = 0.42 * math.exp(max(-60.0, -0.14 * ((sinr_margin_db - 6.5) ** 2)))
-            mcs_headroom_waste = max(0, mcs_ceiling_idx - safe_mcs_idx)
-            mcs_ceiling_risk_pen = 0.04 * mcs_headroom_waste if (minstrel_overshoot > 0) else 0.015 * mcs_headroom_waste
+            amc_stability_bonus = 0.68 * math.exp(max(-60.0, -0.55 * (mcs_delta * mcs_delta)))
+            mcs_ceiling_risk_pen = 0.15 * mcs_over_ceiling + 0.12 * mcs_under_ceiling
+            bw_mismatch_pen = 0.36 * abs(actual_bw_idx - opt_bw_idx)
 
             link_efficiency_bonus = (
-                - 0.16 * (tx_underpower_pen_db + tx_overdrive_pen_db)
-                - 0.22 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
+                - 0.26 * (tx_underpower_pen_db + tx_overdrive_pen_db)
+                - 0.28 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
                 - mcs_ceiling_risk_pen
-                + (0.32 if roaming_handover_factor >= 1.0 else -0.25)
-                + (0.28 if bf_gain_db > 1.0 else -0.24)
+                - bw_mismatch_pen
+                + (0.34 if roaming_handover_factor >= 1.0 else -0.26)
+                + (0.30 if bf_gain_db > 1.0 else -0.26)
             )
 
             penalty_collision = 3.9 * (p_c * p_c) + 1.8 * per_phy
@@ -784,8 +863,7 @@ class UltimateDigitalTwinEnv(gym.Env):
 
         tx_base = int(np.clip(np.round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0, 6))
         tx_cands = sorted(list(set([max(0, tx_base - 1), tx_base, min(6, tx_base + 1)])))
-        eff_ofdma_est = ofdma_obs if base_ofdma_capacity is None else float(base_ofdma_capacity)
-        obss_base = int(np.clip(np.round((eff_ofdma_est - 0.12) / 0.16), 0, 4))
+        obss_base = int(np.clip(np.round((ofdma_obs - 0.12) / 0.16), 0, 4))
         obss_cands = sorted(list(set([max(0, obss_base - 1), obss_base, min(4, obss_base + 1)])))
         bcn_opt = 0 if int(round(is_break)) == 1 else 1
         is_csi_aging = (
@@ -1051,8 +1129,10 @@ class UltimateDigitalTwinEnv(gym.Env):
         rssi_next = float(np.clip(0.80 * float(prev_obs[0]) + 0.20 * self.target_rssi + self.rng.normal(0.0, 0.8), OBS_LOW[0], OBS_HIGH[0]))
         sta_next = float(np.clip(0.82 * float(prev_obs[2]) + 0.18 * self.target_sta + self.rng.normal(0.0, 1.8), OBS_LOW[2], OBS_HIGH[2]))
 
-        # CẢM BIẾN PHY: nhiễu nền đo tại kênh ĐANG CHỌN (`noise_on_chosen_ch`)
-        noise_next = float(np.clip(float(self.true_ch_noise[self.current_ch]) + self.rng.normal(0.0, 0.30), OBS_LOW[1], OBS_HIGH[1]))
+        # CẢM BIẾN PHY: nhiễu nền đo trên toàn cụm subchannel đang gộp (`occupied_subs` của kênh & BW đang dùng)
+        _, _, occ_subs_step, _ = resolve_valid_5g_channel_and_bw(self.current_ch, int(np.clip(act[1], 0, 2)))
+        occ_noise_max = max(float(self.true_ch_noise[self._CH_INDEX_MAP[c]]) for c in occ_subs_step)
+        noise_next = float(np.clip(occ_noise_max + self.rng.normal(0.0, 0.25), OBS_LOW[1], OBS_HIGH[1]))
 
         # PHẢN HỒI NHÂN QUẢ TẦNG MAC (75% trực tiếp từ kết quả thực thi `metrics` của Agent)
         retry_next = float(np.clip(0.25 * float(prev_obs[3]) + 0.75 * metrics["retry_rate"] + self.rng.normal(0.0, 0.012), OBS_LOW[3], OBS_HIGH[3]))
