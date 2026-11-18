@@ -121,30 +121,50 @@ def build_stacked_obs(obs_history: Any, n_stack: int = N_FRAME_STACK) -> np.ndar
 
 class NormalizedWifiFeaturesExtractor(BaseFeaturesExtractor):
     """
-    Bộ trích xuất đặc trưng chuẩn hóa Min-Max về [-1.0, 1.0].
-    Tự động co giãn theo cả observation 8D đơn lẻ lẫn `8 * N_FRAME_STACK = 32` chiều sau `VecFrameStack`.
+    Bộ trích xuất đặc trưng chuẩn hóa Min-Max về [-1.0, 1.0] kết hợp:
+      1) Khung trạng thái hiện tại `obs_t` (8D cuối) mở rộng qua lưới Radial Basis Functions (RBF 8 tâm đều
+         trên [-1, 1] theo Sutton & Barto Ch. 9.5) giúp mạng phân giải sắc nét các nấc lượng tử hóa bậc thang
+         (12 nấc MCS, 7 nấc Tx Power, 5 nấc OBSS-PD, 3 nấc BW) mà không bị nhòe bởi спектраl bias.
+      2) Nhánh vi phân thời gian (Temporal Delta) trên cửa sổ `VecFrameStack`.
     """
     def __init__(self, observation_space: spaces.Box):
         super().__init__(observation_space, features_dim=64)
         obs_dim = int(observation_space.shape[0])
-        n_stack = max(1, obs_dim // len(OBS_LOW))
-        low_tiled = np.tile(OBS_LOW, n_stack)[:obs_dim]
-        high_tiled = np.tile(OBS_HIGH, n_stack)[:obs_dim]
-        self.register_buffer("low", torch.tensor(low_tiled, dtype=torch.float32))
-        self.register_buffer("high", torch.tensor(high_tiled, dtype=torch.float32))
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, 64),
-            nn.LayerNorm(64),
+        self.obs_dim = obs_dim
+        self.register_buffer("low8", torch.tensor(OBS_LOW.copy(), dtype=torch.float32))
+        self.register_buffer("high8", torch.tensor(OBS_HIGH.copy(), dtype=torch.float32))
+        self.register_buffer("rbf_centers", torch.linspace(-1.0, 1.0, 8, dtype=torch.float32).view(1, 1, 8))
+        # Đầu vào cur_net: 8 (linear) + 8*8 (uniform RBF) = 72 chiều
+        self.cur_skip = nn.Linear(72, 64)
+        self.cur_net = nn.Sequential(
+            nn.Linear(72, 128),
             nn.SiLU(),
-            nn.Linear(64, 64),
-            nn.LayerNorm(64),
+            nn.Linear(128, 128),
             nn.SiLU(),
+            nn.Linear(128, 64),
+        )
+        self.delta_net = nn.Sequential(
+            nn.Linear(8, 32),
+            nn.SiLU(),
+            nn.Linear(32, 64),
         )
 
+    def _norm8(self, x8: torch.Tensor) -> torch.Tensor:
+        n = 2.0 * (x8 - self.low8) / (self.high8 - self.low8 + 1e-6) - 1.0
+        return torch.clamp(n, -1.0, 1.0)
+
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        norm_obs = 2.0 * (observations - self.low) / (self.high - self.low + 1e-6) - 1.0
-        norm_obs = torch.clamp(norm_obs, -1.0, 1.0)
-        return self.net(norm_obs)
+        cur_raw = observations[:, -8:]
+        cur_norm = self._norm8(cur_raw)
+        diff = cur_norm.unsqueeze(-1) - self.rbf_centers
+        rbf_feat = torch.exp(-10.0 * (diff * diff)).reshape(cur_norm.shape[0], 64)
+        cur_full = torch.cat([cur_norm, rbf_feat], dim=-1)
+        out = self.cur_skip(cur_full) + self.cur_net(cur_full)
+        if observations.shape[1] >= 16:
+            prev_raw = observations[:, -16:-8]
+            delta_norm = cur_norm - self._norm8(prev_raw)
+            out = out + 0.15 * self.delta_net(delta_norm)
+        return out
 
 
 CrossLayerNormExtractor = NormalizedWifiFeaturesExtractor
@@ -228,6 +248,7 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
          mở cổng để PPO thoát kênh và đưa kênh vừa hỏng vào `quarantine` trong `quarantine_steps` bước.
     """
     _ESCAPE_ROTATION = (4, 0, 6, 2, 5, 1, 7, 3, 8)
+    _global_escape_cursor = 0
 
     def __init__(
         self,
@@ -247,7 +268,7 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
         self.step_count = 0
         self.last_switch_step = -100
         self.current_ch = 0
-        self.escape_cursor = 0
+        self.escape_cursor = StatefulChannelGuardWrapper._global_escape_cursor
         self.quarantine_until: Dict[int, int] = {}
 
     def reset(self, **kwargs):
@@ -259,15 +280,15 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
         return obs, info
 
     def _quarantine_channel_and_cluster(self, ch_idx: int, noise_obs: float) -> None:
-        """Cách ly nhân quả kênh đang nhiễu và cụm gộp 40/80 MHz lân cận khi phát hiện nhiễu băng rộng."""
+        """Cách ly nhân quả kênh đang nhiễu và cụm gộp 40/80 MHz lân cận khi phát hiện nhiễu."""
         self.quarantine_until[ch_idx] = self.step_count + self.quarantine_steps
-        if noise_obs > -80.0 and ch_idx < 8:
+        if noise_obs > -84.0 and ch_idx < 8:
             partner_40 = ch_idx ^ 1
             self.quarantine_until[partner_40] = max(
                 self.quarantine_until.get(partner_40, 0),
-                self.step_count + max(6, self.quarantine_steps // 2),
+                self.step_count + max(6, self.quarantine_steps - 3),
             )
-        if noise_obs > -71.5 and ch_idx < 8:
+        if noise_obs > -75.0 and ch_idx < 8:
             block_range = range(0, 4) if ch_idx < 4 else range(4, 8)
             exp_block = self.step_count + max(8, self.quarantine_steps - 2)
             for c_b in block_range:
@@ -276,23 +297,18 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
     def _pick_rotated_escape_channel(
         self, allowed: list, proposed_ch: int, bw_req: int, sta_obs: float
     ) -> int:
-        self.escape_cursor = (self.escape_cursor + 1) % len(self._ESCAPE_ROTATION)
-        rot_order = [
-            self._ESCAPE_ROTATION[(self.escape_cursor + i) % len(self._ESCAPE_ROTATION)]
-            for i in range(len(self._ESCAPE_ROTATION))
-        ]
-        allowed_rot = [c for c in rot_order if c in allowed and c != self.current_ch]
-        if not allowed_rot:
-            allowed_rot = [c for c in allowed if c != self.current_ch] or allowed
-        # Khi bão tải mật độ cao (cần HE20), ưu tiên định kỳ khám phá cả CH165 (idx 8)
-        if (sta_obs > 78.0 or bw_req == 0) and (8 in allowed_rot) and (self.escape_cursor % 3 == 0):
-            return 8
-        # Khi cần băng thông rộng HE40/HE80, ưu tiên kênh 0..7 hỗ trợ gộp kênh
-        if bw_req > 0:
-            wide_cands = [c for c in allowed_rot if c < 8]
-            if wide_cands:
-                return wide_cands[0]
-        return allowed_rot[0]
+        for _ in range(len(self._ESCAPE_ROTATION)):
+            cand = self._ESCAPE_ROTATION[self.escape_cursor % len(self._ESCAPE_ROTATION)]
+            self.escape_cursor = (self.escape_cursor + 1) % len(self._ESCAPE_ROTATION)
+            StatefulChannelGuardWrapper._global_escape_cursor = self.escape_cursor
+            if cand in allowed and cand != self.current_ch:
+                if cand == 8 and bw_req > 0 and sta_obs <= 72.0 and (self.escape_cursor % 3 != 0):
+                    wide_alt = [c for c in allowed if c < 8 and c != self.current_ch]
+                    if wide_alt:
+                        continue
+                return cand
+        allowed_other = [c for c in allowed if c != self.current_ch] or allowed
+        return allowed_other[0]
 
     def filter_channel_action(self, obs_seen: np.ndarray, action: np.ndarray) -> Tuple[np.ndarray, bool]:
         act = np.array(action, dtype=np.int64, copy=True).reshape(-1)
@@ -330,10 +346,7 @@ class StatefulChannelGuardWrapper(gym.Wrapper):
                 oldest_ch = min(self.quarantine_until.items(), key=lambda kv: kv[1])[0]
                 self.quarantine_until.pop(oldest_ch, None)
                 allowed = [oldest_ch]
-            if (act[0] not in allowed) or (act[0] == self.current_ch) or (need_escape and (self.escape_cursor % 2 == 0)):
-                act[0] = self._pick_rotated_escape_channel(allowed, proposed_ch, int(act[1]), sta_obs)
-            else:
-                self.escape_cursor = (self.escape_cursor + 1) % len(self._ESCAPE_ROTATION)
+            act[0] = self._pick_rotated_escape_channel(allowed, proposed_ch, int(act[1]), sta_obs)
         elif (not need_escape) and (act[0] in self.quarantine_until) and (act[0] != self.current_ch):
             # Bảo vệ không nhảy từ kênh sạch sang kênh vẫn đang trong thời hạn cách ly
             act[0] = self.current_ch
@@ -413,6 +426,7 @@ class UltimateDigitalTwinEnv(gym.Env):
         self.aqm_enabled = bool(aqm_enabled)
         self.max_steps = int(max_steps)
         self.obs_mask_phy = bool(obs_mask_phy)
+        self.base_seed = int(seed)
         self.rng = np.random.default_rng(seed)
 
         self.action_space = spaces.MultiDiscrete(ACTION_NVEC)
@@ -550,9 +564,16 @@ class UltimateDigitalTwinEnv(gym.Env):
 
             opt_tx_idx = float(int(clip(round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0.0, 6.0)))
             target_tx_dbm = 14.0 + opt_tx_idx
-            tx_underpower_pen_db = max(0.0, target_tx_dbm - tx_power_dbm) * 1.55
-            tx_overdrive_pen_db = max(0.0, tx_power_dbm - target_tx_dbm) * 1.45
-            rssi_compensated = rssi + 0.65 * (tx_power_dbm - 17.0) - freq_loss_db - tx_underpower_pen_db - 0.35 * tx_overdrive_pen_db
+            tx_underpower_pen_db = max(0.0, target_tx_dbm - tx_power_dbm) * 1.65
+            tx_overdrive_pen_db = max(0.0, tx_power_dbm - target_tx_dbm) * 1.65
+            effective_tx_dbm = min(tx_power_dbm, target_tx_dbm)
+            rssi_compensated = (
+                rssi
+                + 0.65 * (effective_tx_dbm - 17.0)
+                - 0.15 * freq_loss_db
+                - tx_underpower_pen_db
+                - 0.85 * tx_overdrive_pen_db
+            )
 
             is_break_flag = (int(round(is_break)) == 1)
             is_csi_aging_regime = (
@@ -561,10 +582,10 @@ class UltimateDigitalTwinEnv(gym.Env):
                 or ((sta > 70.0) and (retry_obs > 0.30))
             )
             if bf_idx == 1:
-                bf_gain_db = -2.0 if is_csi_aging_regime else 2.8
+                bf_gain_db = -2.2 if is_csi_aging_regime else 2.8
                 csi_sounding_overhead = 0.068 if is_csi_aging_regime else 0.012
             else:
-                bf_gain_db = 1.2 if is_csi_aging_regime else -1.1
+                bf_gain_db = 1.4 if is_csi_aging_regime else -1.4
                 csi_sounding_overhead = 0.0
 
             escaped_rf_jam = (noise_obs > -84.0) and (occ_max_noise_dbm <= -88.0)
@@ -575,7 +596,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             # Điểm tối ưu OBSS-PD và chế độ tải neo trực tiếp vào biến quan sát `obs` để không rò rỉ biến ẩn
             opt_obss_level = float(int(clip(round((ofdma_obs - 0.12) / 0.16), 0.0, 4.0)))
             obss_interference_leak_db = max(0.0, float(obss_idx) - opt_obss_level) * 1.75
-            obss_cca_deferral_pen_db = max(0.0, opt_obss_level - float(obss_idx)) * 1.45
+            obss_cca_deferral_pen_db = max(0.0, opt_obss_level - float(obss_idx)) * 1.75
 
             is_heavy_load = (sta > 78.0) or ((airtime_obs > 0.76) and (ofdma_obs < 0.32))
             is_medium_load = (not is_heavy_load) and (32.0 < sta <= 78.0)
@@ -591,7 +612,7 @@ class UltimateDigitalTwinEnv(gym.Env):
 
             eff_sinr_db = (
                 rssi_compensated + bf_gain_db - eff_noise_dbm - fading_margin_db
-                - obss_interference_leak_db
+                - obss_interference_leak_db - 0.35 * obss_cca_deferral_pen_db
             )
 
             # 3. TẦNG ĐIỀU CHẾ THÍCH ỨNG MINSTREL-HT (AMC VỚI ĐIỂM NGỌT PER <= 1.5%)
@@ -600,7 +621,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             link_sinr_est = (
                 rssi
                 + 0.65 * (target_tx_dbm - 17.0)
-                + (1.2 if is_csi_aging_regime else 2.8)
+                + (1.4 if is_csi_aging_regime else 2.8)
                 - clean_ref_noise
                 - ref_fading_db
             )
@@ -621,23 +642,27 @@ class UltimateDigitalTwinEnv(gym.Env):
             mcs_over_ceiling = max(0, mcs_ceiling_idx - safe_mcs_idx)
             mcs_under_ceiling = max(0, safe_mcs_idx - mcs_ceiling_idx)
 
-            req_sinr_db = cls._MCS_REQ_SINR_TUPLE[operating_mcs_idx]
-            sinr_margin_db = eff_sinr_db - req_sinr_db
+            # Neo PER vào biên SINR của kênh + phạt thăm dò Minstrel (over) & kéo giãn airtime (under)
+            base_req_sinr_db = cls._MCS_REQ_SINR_TUPLE[max(operating_mcs_idx, safe_mcs_idx)]
+            sinr_margin_db = eff_sinr_db - base_req_sinr_db
             exp_arg = clip(0.95 * (sinr_margin_db - 2.1), -60.0, 60.0)
             per_sigmoid = 1.0 / (1.0 + math.exp(exp_arg))
-            mcs_overreach_db = max(0.0, (req_sinr_db + 5.5) - eff_sinr_db)
+            mcs_overreach_db = max(0.0, (base_req_sinr_db + 5.5) - eff_sinr_db)
             per_phy = clip(
-                per_sigmoid + 0.032 * (mcs_overreach_db * mcs_overreach_db) + 0.015 * mcs_over_ceiling,
+                per_sigmoid
+                + 0.032 * (mcs_overreach_db * mcs_overreach_db)
+                + 0.022 * mcs_over_ceiling
+                + 0.014 * mcs_under_ceiling,
                 0.002,
                 0.96,
             )
 
             if is_heavy_load:
-                bw_contention_factor = 0.44 if actual_bw_idx == 0 else (1.58 if actual_bw_idx == 1 else 2.35)
+                bw_contention_factor = 0.42 if actual_bw_idx == 0 else (1.65 if actual_bw_idx == 1 else 2.55)
             elif is_medium_load or (occ_max_noise_dbm > -86.0):
-                bw_contention_factor = 1.12 if actual_bw_idx == 0 else (0.52 if actual_bw_idx == 1 else 1.72)
+                bw_contention_factor = 1.25 if actual_bw_idx == 0 else (0.48 if actual_bw_idx == 1 else 1.95)
             else:
-                bw_contention_factor = 1.38 if actual_bw_idx == 0 else (0.95 if actual_bw_idx == 1 else 0.32)
+                bw_contention_factor = 1.48 if actual_bw_idx == 0 else (1.05 if actual_bw_idx == 1 else 0.30)
 
             channel_interf_ratio = clip((eff_noise_dbm - (-95.0)) / 32.0, 0.01, 0.92)
             ofdma_deficit = max(0.0, 0.62 - eff_ofdma_base)
@@ -680,16 +705,16 @@ class UltimateDigitalTwinEnv(gym.Env):
             total_overhead = min(0.35, beacon_overhead + csi_sounding_overhead + (0.18 if is_invalid_bonding else 0.0))
             service_capacity_mbps = max(8.0, phy_rate_mbps * (1.0 - total_overhead) * (1.0 - p_c) * (1.0 - 0.65 * per_phy))
 
-            env_clean_sinr_est = (rssi + 2.0) - (-94.5) - (3.5 if is_heavy_load else 1.2)
-            reachable_mcs_idx = cls._mcs_lookup(env_clean_sinr_est - 6.5)
-            mcs_demand_scale = 0.68 * ((0.28 * cls._MCS_BASE_RATE_TUPLE[reachable_mcs_idx] + 0.09 * 137.6) / 89.6)
+            # Đồng bộ ước lượng MCS khả dụng của tải yêu cầu với đúng `safe_mcs_idx` trên kênh sạch
+            reachable_mcs_idx = safe_mcs_idx
+            mcs_demand_scale = 0.66 * ((0.28 * cls._MCS_BASE_RATE_TUPLE[reachable_mcs_idx] + 0.09 * 137.6) / 89.6)
 
             if (not is_heavy_load) and (not is_medium_load):
-                base_demand = clip(110.0 + sta * 1.25 + 14.0 * eff_airtime_in, 115.0, 190.0)
+                base_demand = clip(105.0 + sta * 1.15 + 12.0 * eff_airtime_in, 110.0, 178.0)
             elif is_medium_load:
-                base_demand = clip(58.0 + sta * 0.40 + 10.0 * eff_airtime_in, 62.0, 102.0)
+                base_demand = clip(55.0 + sta * 0.38 + 8.0 * eff_airtime_in, 58.0, 96.0)
             else:
-                base_demand = clip(20.0 + sta * 0.05 + 4.0 * eff_airtime_in, 22.0, 34.0)
+                base_demand = clip(19.0 + sta * 0.05 + 3.5 * eff_airtime_in, 20.0, 32.0)
             offered_load_mbps = base_demand * mcs_demand_scale * float(demand_scale)
 
             airtime_next = clip(offered_load_mbps / max(service_capacity_mbps, 10.0), 0.08, 0.99)
@@ -699,7 +724,7 @@ class UltimateDigitalTwinEnv(gym.Env):
 
             if aqm_enabled:
                 ofdma_queue_relief = 1.0 - 0.25 * ofdma_efficiency
-                queue_delay_ms = (0.95 + 2.1 * min(rho, 1.0) + (22.0 * min(rho - 1.0, 2.5) if rho > 1.01 else 0.0)) * ofdma_queue_relief
+                queue_delay_ms = (0.95 + 1.95 * min(rho, 1.0) + (5.2 * min(rho - 1.0, 2.0) if rho > 1.02 else 0.0)) * ofdma_queue_relief
             else:
                 queue_delay_ms = 3.8 + 14.0 * (min(rho, 3.2) ** 2) + (32.0 * max(0.0, rho - 0.88))
 
@@ -723,20 +748,20 @@ class UltimateDigitalTwinEnv(gym.Env):
 
             # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU VẬT LÝ THUẦN TÚY
             goodput_fulfillment = goodput_mbps / max(offered_load_mbps, 1.0)
-            spectral_efficiency_score = 0.65 * (service_capacity_mbps / max(offered_load_mbps, 20.0))
-            tput_score = 2.15 * goodput_fulfillment + 0.72 * (goodput_mbps / 100.0) + min(1.05, spectral_efficiency_score)
+            spectral_efficiency_score = 0.55 * (service_capacity_mbps / max(offered_load_mbps, 20.0))
+            tput_score = 2.15 * goodput_fulfillment + 0.72 * (goodput_mbps / 100.0) + min(0.95, spectral_efficiency_score)
 
-            amc_stability_bonus = 0.68 * math.exp(max(-60.0, -0.55 * (mcs_delta * mcs_delta)))
-            mcs_ceiling_risk_pen = 0.15 * mcs_over_ceiling + 0.12 * mcs_under_ceiling
-            bw_mismatch_pen = 0.36 * abs(actual_bw_idx - opt_bw_idx)
+            amc_stability_bonus = 0.92 * math.exp(max(-60.0, -0.80 * (mcs_delta * mcs_delta)))
+            mcs_ceiling_risk_pen = 0.32 * mcs_over_ceiling + 0.28 * mcs_under_ceiling
+            bw_mismatch_pen = 0.78 * abs(actual_bw_idx - opt_bw_idx)
 
             link_efficiency_bonus = (
-                - 0.26 * (tx_underpower_pen_db + tx_overdrive_pen_db)
-                - 0.28 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
+                - 0.42 * (tx_underpower_pen_db + tx_overdrive_pen_db)
+                - 0.44 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
                 - mcs_ceiling_risk_pen
                 - bw_mismatch_pen
-                + (0.34 if roaming_handover_factor >= 1.0 else -0.26)
-                + (0.30 if bf_gain_db > 1.0 else -0.26)
+                + (0.42 if roaming_handover_factor >= 1.0 else -0.35)
+                + (0.42 if bf_gain_db > 1.0 else -0.35)
             )
 
             penalty_collision = 3.9 * (p_c * p_c) + 1.8 * per_phy
@@ -1003,18 +1028,15 @@ class UltimateDigitalTwinEnv(gym.Env):
 
         elif regime == 2:  # Nhiễu băng rộng đánh sập 1 cụm 40/80 MHz (UNII-1 hoặc UNII-3 Low/Mid)
             self.target_ch_noise = base_clean
-            cluster_type = int(self.rng.choice([0, 1, 2]))  # 0: sập UNII-1; 1: sập UNII-3 149..161; 2: sập 2 cụm 40MHz
+            cluster_type = int(self.rng.choice([0, 1, 2]))  # 0: sập UNII-1; 1: sập UNII-3 149..161; 2: sập 1 cụm 40MHz bất kỳ
             jam_lvl = float(self.rng.uniform(-71.5, -54.0))
             if cluster_type == 0:
                 self.target_ch_noise[0:4] = jam_lvl - self.rng.uniform(0.0, 2.5, size=4)
-                # Ngẫu nhiên làm hơi nhiễu thêm phần đầu UNII-3 để kích hoạt cả 157, 161, 165
-                if self.rng.random() < 0.45:
-                    self.target_ch_noise[4:6] = float(self.rng.uniform(-79.0, -73.0))
             elif cluster_type == 1:
                 self.target_ch_noise[4:8] = jam_lvl - self.rng.uniform(0.0, 2.5, size=4)
             else:
-                self.target_ch_noise[0:2] = jam_lvl - self.rng.uniform(0.0, 2.0, size=2)
-                self.target_ch_noise[4:6] = jam_lvl - self.rng.uniform(0.0, 2.0, size=2)
+                pair_start = int(self.rng.choice([0, 2, 4, 6]))
+                self.target_ch_noise[pair_start:pair_start + 2] = jam_lvl - self.rng.uniform(0.0, 2.0, size=2)
             self.target_sta = float(self.rng.uniform(12.0, 68.0))
             self.target_ofdma_base = float(self.rng.uniform(0.32, 0.62))
             self.target_demand_scale = float(self.rng.uniform(0.80, 1.05))
@@ -1050,6 +1072,7 @@ class UltimateDigitalTwinEnv(gym.Env):
         noisy_chs = [i for i in range(9) if true_noise[i] > -83.0]
         if noisy_chs and self.rng.random() < 0.60:
             ch_init = int(self.rng.choice(noisy_chs))
+        self.current_ch = ch_init
 
         noise_init = float(np.clip(true_noise[ch_init], OBS_LOW[1], OBS_HIGH[1]))
         sta_init = float(np.clip(self.target_sta, OBS_LOW[2], OBS_HIGH[2]))
@@ -1074,14 +1097,17 @@ class UltimateDigitalTwinEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         if seed is not None:
+            self.base_seed = int(seed)
             self.rng = np.random.default_rng(seed)
+        elif self.current_step == 0:
+            # Khi EvalCallback bắt đầu lượt đánh giá mới ngay sau auto-reset (current_step == 0),
+            # đưa luồng RNG về lại base_seed để mọi kỳ EvalCallback chấm điểm trên cùng bộ kịch bản cố định (CRN)
+            self.rng = np.random.default_rng(self.base_seed)
         self.current_step = 0
         self.previous_action = None
 
         obs0, true_noise, _, _ = self.sample_snapshot_scenario()
         self.true_ch_noise = true_noise.copy()
-        # Chọn kênh khởi đầu phản ánh đúng `obs0[1]`
-        self.current_ch = int(np.argmin(np.abs(self.true_ch_noise - obs0[1])))
         self.true_current_obs = obs0.copy()
         self.current_obs = self._format_obs_output(obs0)
         return self.current_obs.copy(), {"true_ch_noise": self.true_ch_noise.copy(), "current_ch": self.current_ch}
