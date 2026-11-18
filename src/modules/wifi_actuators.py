@@ -183,7 +183,7 @@ def get_teacher_active_clients(ap_ip, username, password, teacher_ssid="School_T
     """
     cmd = (
         "for dev in $(iw dev | awk '$1==\"Interface\"{print $2}'); do "
-        f"  ssid=$(iw dev $dev info | awk '$1==\"ssid\"{{print $2}}'); "
+        f"  ssid=$(iw dev $dev info | awk '$1==\"ssid\"{{$1=\"\"; sub(/^ /, \"\"); print}}'); "
         f"  if [ \"$ssid\" = \"{teacher_ssid}\" ]; then "
         "    iw dev $dev station dump | awk '$1==\"Station\"{print toupper($2)}'; "
         "  fi; "
@@ -194,28 +194,92 @@ def get_teacher_active_clients(ap_ip, username, password, teacher_ssid="School_T
     return macs
 
 
-def prune_unused_ssid(ap_ip, username, password, vap_section="teacher_5g", disable=True):
+def _find_vap_ifname_shell(vap_section: str, teacher_ssid: str, radio_band: str) -> str:
+    """Tạo đoạn shell POSIX trên OpenWrt để tìm đúng ifname của VAP (vd: phy1-ap1)."""
+    phy_idx = "phy1" if "1" in radio_band else "phy0"
+    wlan_cand = "wlan1-1" if phy_idx == "phy1" else "wlan0-1"
+    return (
+        f"VAP_IF=''; "
+        f"for dev in $(ls /var/run/hostapd/ 2>/dev/null); do "
+        f"  s=$(iw dev \"$dev\" info 2>/dev/null | awk '$1==\"ssid\"{{$1=\"\"; sub(/^ /, \"\"); print}}'); "
+        f"  if [ \"$s\" = \"{teacher_ssid}\" ]; then VAP_IF=\"$dev\"; break; fi; "
+        f"done; "
+        f"if [ -z \"$VAP_IF\" ] && which ubus >/dev/null 2>&1 && which jsonfilter >/dev/null 2>&1; then "
+        f"  VAP_IF=$(ubus call network.wireless status 2>/dev/null | "
+        f"    jsonfilter -e '@.{radio_band}.interfaces[@.section=\"{vap_section}\"].ifname' 2>/dev/null | head -n1); "
+        f"fi; "
+        f"if [ -z \"$VAP_IF\" ]; then "
+        f"  for cand in {phy_idx}-ap1 {wlan_cand}; do "
+        f"    [ -e \"/var/run/hostapd/$cand\" ] && VAP_IF=\"$cand\" && break; "
+        f"  done; "
+        f"fi; "
+    )
+
+
+def prune_unused_ssid(
+    ap_ip,
+    username,
+    password,
+    vap_section="teacher_5g",
+    disable=True,
+    radio_band="radio1",
+    teacher_ssid="School_Teacher",
+):
     """
-    Tính năng Dynamic SSID Pruning (Tỉa SSID Động):
-    - Nếu disable=False: Đánh thức mạng 'teacher_5g' (School_Teacher) ngay lập tức.
-    - Nếu disable=True: Kiểm tra xem còn bất kỳ Giáo viên nào đang kết nối không.
-      Nếu còn >= 1 thiết bị đang kết nối, TUYỆT ĐỐI KHÔNG TẮT!
+    Tính năng Dynamic VAP Pruning (Zero-Disruption cho mạng Học sinh):
+    - Nếu disable=True: Kiểm tra kỹ 0 client GV trước khi tắt, sau đó tắt ĐÚNG BSS/VAP `teacher_5g`
+      qua `hostapd_cli -i $VAP_IF disable` (hoặc `ubus call network reload` nếu không có socket/tool),
+      tuyệt đối KHÔNG gọi `wifi reload` toàn cục làm rớt sóng mạng Học sinh (`default_radio1` & `radio0`).
+    - Nếu disable=False: Đánh thức tức thì VAP `teacher_5g` qua `hostapd_cli -i $VAP_IF enable` (0ms gián đoạn);
+      chỉ fallback `ubus call network reload` / `wifi up <radio_band>` nếu BSS chưa từng được hostapd khởi tạo.
     """
     if disable:
-        active_macs = get_teacher_active_clients(ap_ip, username, password)
+        active_macs = get_teacher_active_clients(ap_ip, username, password, teacher_ssid=teacher_ssid)
         if len(active_macs) > 0:
             logging.info(
                 f"   [🛡️ USER-CENTRIC GUARD] Phát hiện {len(active_macs)} thiết bị GV ({active_macs}) "
-                f"vẫn đang kết nối tại AP {ap_ip}. TUYỆT ĐỐI KHÔNG TẮT mạng School_Teacher!"
+                f"vẫn đang kết nối tại AP {ap_ip}. TUYỆT ĐỐI KHÔNG TẮT mạng {teacher_ssid}!"
             )
             return False
 
-    val = '1' if disable else '0'
-    state_str = "TẮT (Thu hồi Airtime)" if disable else "BẬT (Đón Giáo viên VIP)"
+    val = "1" if disable else "0"
+    state_str = "TẮT VAP (Thu hồi Airtime, 0ms gián đoạn Học sinh)" if disable else "BẬT VAP (Đón Giáo viên VIP, 0ms gián đoạn)"
+    find_vap = _find_vap_ifname_shell(vap_section=vap_section, teacher_ssid=teacher_ssid, radio_band=radio_band)
+
+    if disable:
+        apply_cmd = (
+            f"DONE=0; "
+            f"if [ -n \"$VAP_IF\" ] && [ -e \"/var/run/hostapd/$VAP_IF\" ] && which hostapd_cli >/dev/null 2>&1; then "
+            f"  hostapd_cli -i \"$VAP_IF\" disable 2>/dev/null | grep -q 'OK' && DONE=1; "
+            f"fi; "
+            f"if [ \"$DONE\" -eq 0 ] && [ -n \"$VAP_IF\" ] && [ -e \"/var/run/hostapd/$VAP_IF\" ]; then "
+            f"  ubus call network reload >/dev/null 2>&1 || wifi up {radio_band}; "
+            f"fi"
+        )
+    else:
+        apply_cmd = (
+            f"DONE=0; "
+            f"if [ -n \"$VAP_IF\" ] && [ -e \"/var/run/hostapd/$VAP_IF\" ] && which hostapd_cli >/dev/null 2>&1; then "
+            f"  hostapd_cli -i \"$VAP_IF\" enable 2>/dev/null | grep -q 'OK' && DONE=1; "
+            f"fi; "
+            f"if [ \"$DONE\" -eq 0 ]; then "
+            f"  ubus call network reload >/dev/null 2>&1 || true; sleep 2; "
+            f"  LIVE=0; "
+            f"  for dev in $(ls /sys/class/net/ 2>/dev/null); do "
+            f"    s=$(iw dev \"$dev\" info 2>/dev/null | awk '$1==\"ssid\"{{$1=\"\"; sub(/^ /, \"\"); print}}'); "
+            f"    [ \"$s\" = \"{teacher_ssid}\" ] && LIVE=1 && break; "
+            f"  done; "
+            f"  [ \"$LIVE\" -eq 0 ] && wifi up {radio_band}; "
+            f"fi"
+        )
+
     cmd = (
+        f"{find_vap}"
         f"CUR=$(uci -q get wireless.{vap_section}.disabled); "
-        f"if [ \"$CUR\" != \"{val}\" ]; then "
-        f"  uci set wireless.{vap_section}.disabled='{val}' && uci commit wireless && wifi reload; "
+        f"uci set wireless.{vap_section}.disabled='{val}'; "
+        f"uci commit wireless; "
+        f"if [ \"$CUR\" != \"{val}\" ] || [ -n \"$VAP_IF\" ]; then "
+        f"  {apply_cmd}; "
         f"fi"
     )
     success = _exec_ssh_command(ap_ip, username, password, cmd)
