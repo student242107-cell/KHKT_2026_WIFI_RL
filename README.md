@@ -191,10 +191,45 @@ Trong đó:
 - **Phạt Chuyển mạch Phần cứng (`wifi reload` Downtime & Action Flapping):**
   Khi thay đổi kênh ($a_{\text{ch}} \ne a_{\text{ch, prev}}$) hoặc băng thông ($a_{\text{bw}} \ne a_{\text{bw, prev}}$), lệnh `wifi reload` trên phần cứng gây ngắt quãng truyền dẫn ngắn. Nếu độ lợi vật lý thuần túy $\Delta R_{\text{phys}} \le 0.35$ (đổi kênh/băng thông vô ích khi kênh đang sạch), hệ thống áp phạt $P_{\text{flapping}} = -0.85$ (đổi kênh) và $-0.55$ (đổi băng thông), đồng thời mô phỏng chính xác mức sụt giảm Goodput tạm thời và độ trễ quá độ.
 
+<<<<<<< HEAD
 ### 3.6. Các Tối ưu Kỹ thuật Đột phá trong Huấn luyện PPO (`notebooks/training_digital_twin.ipynb`)
 1. **Loại bỏ Biến Ẩn Rò rỉ trong Mục tiêu Vũ khí:** Toàn bộ các ngưỡng mục tiêu của `Bandwidth`, `Tx Power`, `MCS Ceiling`, `OBSS-PD` được định nghĩa hoàn toàn dựa trên vector quan sát được $\mathcal{S}_t$, giúp hàm chính sách $\pi_\theta(a|s)$ đạt tính nhất quán Bayes 100%.
 2. **Cố định Kịch bản Đánh giá Common Random Numbers (CRN) trong `EvalCallback`:** Khi `EvalCallback` bắt đầu mỗi kỳ chấm điểm mới ngay sau auto-reset (`current_step == 0`), bộ sinh số ngẫu nhiên `self.rng` của môi trường đánh giá tự động quay về `self.base_seed`. Nhờ đó, cả 10 kỳ đánh giá dọc theo `360,000` bước đều thi đấu trên **cùng bộ 10 episodes chuẩn**, ngăn chặn triệt để hiện tượng một checkpoint non ở đầu quá trình train vô tình gặp chuỗi episode dễ rồi chiếm giữ `best_model.zip`.
 3. **Bộ Siêu tham số PPO Hội tụ Nhanh:** Huấn luyện **`360,000` bước/seed** trên 5 Seeds độc lập (`[11, 22, 33, 44, 55]`), `n_steps = 1024` (`4` luồng = `4,096` bước/rollout), `batch_size = 256`, `n_epochs = 8`, hệ số chiết khấu tầm ngắn-trung `gamma = 0.55`, `gae_lambda = 0.80`, `ent_coef = 0.001` và lịch giảm tốc độ học `piecewise_lr_schedule(4.0e-4 -> 1.5e-5)`.
+=======
+Ở hệ thống tĩnh ($N$), để chống nghẽn, người quản trị thường lắp dày đặc các AP đắt tiền một cách dư thừa, làm $\text{CapEx}$ và $\text{OpEx}_{\text{Setup}}$ tăng phi mã, nhưng lại làm trầm trọng thêm nhiễu đồng kênh, đẩy $\text{Latency}$ lên cao và hạ thấp $\text{Reliability}$. Ngược lại, Hệ thống $M$ phân hạng AP tối ưu theo mật độ thực, dẹp bỏ Bufferbloat bằng AQL/FQ-CoDel và điều phối phổ bằng AI, dẫn đến:
+
+$$
+\text{Index}_{VN}(M) \gg \text{Index}_{VN}(N)
+$$
+
+#### 2. Hàm Tiện ích Tuyến tính Tổng hợp $U(X)$ và Động lực Phạt Phi Lồi
+
+Hàm tiện ích hệ thống $U(X)$ đánh giá sự đánh đổi toàn diện giữa các tham số trên cấu hình $X \in \{M, N\}$:
+
+$$
+Score = (w_1 \times Spatial\_Throughput) + (w_2 \times Coverage\_Ratio) - (w_3 \times CapEx) + (w_4 \times UQS)
+$$
+
+Với $w_4$ sẽ được gán với giá trị lớn nhất trong 4 trọng số (phản ánh đúng triết lý Thượng Tôn Trải Nghiệm Người Dùng).
+
+```text
+   Tiện ích U(X)
+        ^
+        |          Hệ thống M (Cognitive AI + AQL + Dynamic Pruning)
+   +U_M |..........===============================> Giữ vững Latency_99 <= 15 ms
+        |         /
+        |        /
+      0 +-------/------------------------------------> Mật độ thiết bị / Tải mạng
+        |      /
+        |     /     Hệ thống N (Hạ tầng tĩnh truyền thống)
+   -U_N |..../......-----------------------------\  Độ trễ đuôi bùng nổ (Bufferbloat)
+        |   /                                     \ (Latency_99 >> 15 ms)
+        v  /                                       v Sụp đổ tiện ích phi lồi (Collapse)
+```
+
+Khi mật độ người dùng tăng vọt (ví dụ giờ ra chơi), CSMA/CA truyền thống ở hệ thống $N$ bị nghẽn mạch, hàng đợi ngập tràn gây Bufferbloat khiến $\text{Latency}_{99} \gg 15\,\text{ms}$, kéo $U(N)$ rơi thẳng đứng xuống miền âm (sụp đổ tiện ích). Hệ thống $M$ kích hoạt AQL giới hạn thời gian giữ sóng, điều chỉnh băng thông (HE20/HE40/HE80) và chuyển kênh tự động bằng PPO, duy trì $\text{Latency}_{99} \le 15\,\text{ms}$ trong mọi điều kiện tải.
+>>>>>>> 75a9f2f (Tạo graph cho các AP trong bài toán 1 và thuật toán tham lam)
 
 ---
 
