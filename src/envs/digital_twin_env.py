@@ -580,6 +580,7 @@ class UltimateDigitalTwinEnv(gym.Env):
         is_csi_aging = (bf_on_gain_db - 26.0 * bf_on_ovh) < 0.0
         return float(rho_csi), float(bf_on_gain_db), float(bf_on_ovh), bool(is_csi_aging)
 
+<<<<<<< HEAD
     @classmethod
     def _evaluate_minstrel_ht_amc(
         cls,
@@ -685,6 +686,8 @@ class UltimateDigitalTwinEnv(gym.Env):
             - tx_slew_pen
         )
 
+=======
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
     @classmethod
     def _construct_9ch_spectrum_profile(
         cls,
@@ -767,14 +770,22 @@ class UltimateDigitalTwinEnv(gym.Env):
             if actual_htmode == "HE20":
                 occ_max_noise_dbm = chosen_sub_noise_dbm
                 sec_max_noise_dbm = -100.0
+<<<<<<< HEAD
                 eff_noise_dbm = chosen_sub_noise_dbm
+=======
+                eff_noise_dbm = chosen_sub_noise_dbm - 2.2
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
                 bw_tonal_factor = 1.00
             elif actual_htmode == "HE40":
                 i0, i1 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]]
                 n0, n1 = float(spectrum_noise[i0]), float(spectrum_noise[i1])
                 occ_max_noise_dbm = n0 if n0 >= n1 else n1
                 sec_max_noise_dbm = n1 if ch_idx == i0 else n0
+<<<<<<< HEAD
                 eff_noise_dbm = cls._dbm_sum(n0, n1)
+=======
+                eff_noise_dbm = cls._dbm_sum(n0, n1) + 0.5
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
                 bw_tonal_factor = 2.04
             else:  # HE80 (4 kênh 20 MHz liên tiếp)
                 i0, i1, i2, i3 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]], ch_map[occupied_subs[2]], ch_map[occupied_subs[3]]
@@ -843,12 +854,24 @@ class UltimateDigitalTwinEnv(gym.Env):
                 eff_sinr_db, mcs_ceiling_idx, ewma_lag_db
             )
 
+<<<<<<< HEAD
             primary_cca_stall = 0.14 * clip((chosen_sub_noise_dbm - (-85.0)) / 24.0, 0.0, 1.0)
             secondary_pifs_block = 0.06 * clip((sec_max_noise_dbm - (-82.0)) / 24.0, 0.0, 1.0)
             channel_interf_ratio = clip(
                 (eff_noise_dbm - (-95.0)) / 34.0 + primary_cca_stall + secondary_pifs_block,
                 0.01,
                 0.94,
+=======
+            # 3. TẦNG ĐIỀU CHẾ THÍCH ỨNG MINSTREL-HT (AMC VỚI ĐIỂM NGỌT PER <= 1.5%)
+            clean_ref_noise = -96.4 if opt_bw_idx == 0 else (-90.7 if opt_bw_idx == 1 else -86.2)
+            ref_fading_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - ofdma_obs)
+            link_sinr_est = (
+                rssi
+                + 0.65 * (target_tx_dbm - 17.0)
+                + max(0.0, bf_on_gain_db)
+                - clean_ref_noise
+                - ref_fading_db
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             )
             bw_cont_mult = 1.0 + float(actual_bw_idx) * (
                 0.55 * (sta / 50.0) + 1.15 * alpha_leg + (0.75 if occ_max_noise_dbm > -86.0 else 0.0)
@@ -858,6 +881,43 @@ class UltimateDigitalTwinEnv(gym.Env):
                 0.08,
                 0.95,
             )
+<<<<<<< HEAD
+=======
+
+            if is_heavy_load:
+                bw_contention_factor = 0.42 if actual_bw_idx == 0 else (1.65 if actual_bw_idx == 1 else 2.55)
+            elif is_medium_load or (occ_max_noise_dbm > -86.0):
+                bw_contention_factor = 1.25 if actual_bw_idx == 0 else (0.48 if actual_bw_idx == 1 else 1.95)
+            else:
+                bw_contention_factor = 1.48 if actual_bw_idx == 0 else (1.05 if actual_bw_idx == 1 else 0.30)
+
+            primary_cca_stall = 0.14 * clip((chosen_sub_noise_dbm - (-85.0)) / 24.0, 0.0, 1.0)
+            secondary_pifs_block = 0.06 * clip((sec_max_noise_dbm - (-82.0)) / 24.0, 0.0, 1.0)
+            channel_interf_ratio = clip(
+                (eff_noise_dbm - (-95.0)) / 32.0 + primary_cca_stall + secondary_pifs_block,
+                0.01,
+                0.94,
+            )
+            ofdma_deficit = max(0.0, 0.62 - eff_ofdma_base)
+            ofdma_spike_pen = 0.22 if (eff_ofdma_base < 0.28 and (actual_bw_idx != 0 or (bf_idx != 1 and not is_csi_aging_regime))) else 0.0
+
+            if occ_max_noise_dbm <= -88.0:
+                load_pressure = clip((sta / 155.0) + 0.20 * eff_airtime_in + 0.26 * ofdma_deficit, 0.05, 0.95)
+            else:
+                load_pressure = clip((sta / 135.0) + 0.40 * eff_airtime_in + 0.40 * ofdma_deficit, 0.06, 1.30)
+
+            sr_reuse_bonus = 0.06 * (1.0 - min(1.0, abs(float(obss_idx) - opt_obss_level) / 2.0))
+            ofdma_scheduler_gain = (
+                0.56 * eff_ofdma_base
+                + 0.28 * (1.0 - 0.16 * actual_bw_idx)
+                + (0.06 if bf_gain_db > 0 else -0.04)
+                + sr_reuse_bonus
+                - 0.26 * channel_interf_ratio
+            )
+            ofdma_efficiency = clip(ofdma_scheduler_gain, 0.08, 0.95)
+            mac_contention = load_pressure * bw_contention_factor * (1.0 - 0.38 * ofdma_efficiency) + 0.035 * obss_cca_deferral_pen_db
+
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             p_c = clip(
                 0.38 * channel_interf_ratio
                 + 0.26 * (sta / 110.0) * bw_cont_mult * (1.0 - 0.42 * ofdma_efficiency)
@@ -898,12 +958,46 @@ class UltimateDigitalTwinEnv(gym.Env):
                 raw_demand = 18.0 + 0.05 * sta
             offered_load_mbps = raw_demand * exog_link_scale * float(demand_scale)
 
+<<<<<<< HEAD
             cur_backlog = max(0.0, float(queue_backlog_mb))
             airtime_next = clip((offered_load_mbps + cur_backlog * 2.0) / max(service_capacity_mbps, 8.0), 0.08, 0.99)
 
             es_ms = 12.0 / service_capacity_mbps
             cs2 = max(0.25, 0.55 + 2.8 * (p_c * p_c) + 1.6 * retry_rate - 0.30 * ofdma_efficiency)
             rho = offered_load_mbps / service_capacity_mbps
+=======
+            ofdma_tput_boost = 0.88 + 0.26 * ofdma_efficiency
+            effective_mcs_rate = 0.28 * cls._MCS_BASE_RATE_TUPLE[operating_mcs_idx] + 0.09 * 137.6
+            alpha_leg = clip((0.58 - eff_ofdma_base) / 0.50, 0.0, 1.0)
+            r_he_raw = effective_mcs_rate * bw_tonal_factor
+            r_leg_cap = min(r_he_raw, 26.0 + 2.0 * float(operating_mcs_idx))
+            r_harmonic = 1.0 / ((1.0 - alpha_leg) / max(r_he_raw, 1.0) + alpha_leg / max(r_leg_cap, 1.0))
+            eta_heusse = (0.72 + 0.28 * (r_harmonic / max(r_he_raw, 1.0))) if aqm_enabled else (r_harmonic / max(r_he_raw, 1.0))
+            phy_rate_mbps = r_he_raw * eta_heusse * roaming_handover_factor * ofdma_tput_boost
+
+            legacy_prot_overhead = 0.085 * (alpha_leg * alpha_leg) * (1.0 + 0.35 * float(actual_bw_idx))
+            total_overhead = min(
+                0.42,
+                beacon_overhead + csi_sounding_overhead + legacy_prot_overhead + (0.18 if is_invalid_bonding else 0.0),
+            )
+            service_capacity_mbps = max(8.0, phy_rate_mbps * (1.0 - total_overhead) * (1.0 - p_c) * (1.0 - 0.65 * per_phy))
+
+            # Đồng bộ ước lượng MCS khả dụng của tải yêu cầu với đúng `safe_mcs_idx` trên kênh sạch
+            reachable_mcs_idx = safe_mcs_idx
+            mcs_demand_scale = 0.66 * ((0.28 * cls._MCS_BASE_RATE_TUPLE[reachable_mcs_idx] + 0.09 * 137.6) / 89.6)
+
+            if (not is_heavy_load) and (not is_medium_load):
+                base_demand = clip(105.0 + sta * 1.15 + 12.0 * eff_airtime_in, 110.0, 178.0)
+            elif is_medium_load:
+                base_demand = clip(55.0 + sta * 0.38 + 8.0 * eff_airtime_in, 58.0, 96.0)
+            else:
+                base_demand = clip(19.0 + sta * 0.05 + 3.5 * eff_airtime_in, 20.0, 32.0)
+            offered_load_mbps = base_demand * mcs_demand_scale * float(demand_scale)
+
+            airtime_next = clip(offered_load_mbps / max(service_capacity_mbps, 10.0), 0.08, 0.99)
+
+            rho = offered_load_mbps / max(service_capacity_mbps, 8.0)
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             overload_ratio = max(0.0, (offered_load_mbps - service_capacity_mbps) / max(offered_load_mbps, 1.0))
             rho_eff = min(rho, 0.92 if aqm_enabled else 0.985)
             w_pk_ms = (rho_eff * es_ms * (1.0 + cs2)) / (2.0 * max(0.015, 1.0 - rho_eff))
@@ -916,6 +1010,7 @@ class UltimateDigitalTwinEnv(gym.Env):
                 b_max_mb = 18.0
                 congestion_drop = 0.48 * overload_ratio
 
+<<<<<<< HEAD
             w_backlog_ms = (cur_backlog / service_capacity_mbps) * 1000.0
             backlog_next_mb = clip(
                 cur_backlog + (offered_load_mbps * (1.0 - congestion_drop) - service_capacity_mbps) * 0.22,
@@ -930,6 +1025,15 @@ class UltimateDigitalTwinEnv(gym.Env):
                 0.12
                 + 1.25 * (p_c * p_c)
                 + (1.50 * overload_ratio if aqm_enabled else 8.00 * overload_ratio)
+=======
+            retrans_delay_ms = 1.15 * (retry_rate / max(1.0 - retry_rate, 0.16))
+            handover_delay_ms = 2.8 if (is_break_flag and beacon_idx == 1) else (0.55 if ((not is_break_flag) and beacon_idx == 0) else 0.0)
+            mean_latency_ms = 1.55 + queue_delay_ms + retrans_delay_ms + handover_delay_ms
+            jitter_ms = (
+                0.12
+                + 1.30 * (p_c * p_c)
+                + (1.65 * overload_ratio if aqm_enabled else 8.2 * overload_ratio)
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
                 + 0.42 * (alpha_leg * alpha_leg)
             )
             p99_latency_ms = gamma_p99_from_moments(mean_latency_ms, jitter_ms, d_min=1.50)
@@ -945,6 +1049,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             )
             goodput_mbps = raw_goodput_mbps * max(0.15, tcp_qoe_factor)
 
+<<<<<<< HEAD
             # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU 100% PURE OUTCOME KPI
             reward = cls._compute_kpi_reward(
                 goodput_mbps=goodput_mbps,
@@ -957,6 +1062,41 @@ class UltimateDigitalTwinEnv(gym.Env):
                 tx_power_dbm=tx_power_dbm,
                 is_invalid_bonding=is_invalid_bonding,
                 tx_slew_pen=0.0,
+=======
+            # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU VẬT LÝ THUẦN TÚY
+            goodput_fulfillment = goodput_mbps / max(offered_load_mbps, 1.0)
+            spectral_efficiency_score = 0.55 * (service_capacity_mbps / max(offered_load_mbps, 20.0))
+            tput_score = 2.15 * goodput_fulfillment + 0.72 * (goodput_mbps / 100.0) + min(0.95, spectral_efficiency_score)
+
+            amc_stability_bonus = 0.92 * math.exp(max(-60.0, -0.80 * (mcs_delta * mcs_delta)))
+            mcs_ceiling_risk_pen = 0.32 * mcs_over_ceiling + 0.28 * mcs_under_ceiling
+            bw_mismatch_pen = 0.78 * abs(actual_bw_idx - opt_bw_idx)
+
+            link_efficiency_bonus = (
+                - 0.42 * (tx_underpower_pen_db + tx_overdrive_pen_db)
+                - 0.44 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
+                - mcs_ceiling_risk_pen
+                - bw_mismatch_pen
+                + (0.42 if roaming_handover_factor >= 1.0 else -0.35)
+                + (0.42 if ((bf_idx == 1) != is_csi_aging_regime) else -0.35)
+            )
+
+            penalty_collision = 3.9 * (p_c * p_c) + 1.8 * per_phy
+            penalty_latency = 0.038 * min(p99_latency_ms, 60.0) + 1.20 * math.tanh(max(0.0, p99_latency_ms - 15.0) / 16.0)
+            penalty_loss = 3.2 * packet_loss_ratio + (0.60 if packet_loss_pct >= 1.0 else 0.0)
+            sla_bonus = 0.60 if (p99_latency_ms <= 15.0 and packet_loss_pct < 1.0) else -0.40
+            invalid_bond_pen = -0.80 if is_invalid_bonding else 0.0
+
+            reward = float(
+                tput_score
+                + amc_stability_bonus
+                + link_efficiency_bonus
+                - penalty_collision
+                - penalty_latency
+                - penalty_loss
+                + sla_bonus
+                + invalid_bond_pen
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             )
 
             return {
@@ -983,9 +1123,12 @@ class UltimateDigitalTwinEnv(gym.Env):
                 "bf_corr_rho": float(rho_csi),
                 "legacy_share": float(alpha_leg),
                 "legacy_prot_overhead": float(legacy_prot_overhead),
+<<<<<<< HEAD
                 "backlog_next_mb": float(backlog_next_mb),
                 "w_pk_ms": float(w_pk_ms),
                 "w_backlog_ms": float(w_backlog_ms),
+=======
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             }
         except Exception as exc:
             logging.error(f"Lỗi trong _original_evaluate_network_physics: {exc}")
@@ -997,7 +1140,10 @@ class UltimateDigitalTwinEnv(gym.Env):
                 "mean_latency_ms": 20.0, "p99_latency_ms": 50.0, "jitter_ms": 10.0,
                 "packet_loss_pct": 25.0, "is_csi_aging_regime": 0.0,
                 "bf_corr_rho": 1.0, "legacy_share": 0.0, "legacy_prot_overhead": 0.0,
+<<<<<<< HEAD
                 "backlog_next_mb": 0.0, "w_pk_ms": 2.0, "w_backlog_ms": 0.0,
+=======
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
             }
 
     @classmethod
@@ -1094,6 +1240,7 @@ class UltimateDigitalTwinEnv(gym.Env):
     ) -> Tuple[np.ndarray, Dict[str, float]]:
         """Tìm nghiệm tối ưu toàn cục thực sự argmax_a R_physics(s, a) bằng vector hóa NumPy chính xác tuyệt đối trên 21,000 cấu hình không bị trội."""
         rssi, noise_obs, sta, retry_obs, pc_obs, airtime_obs, ofdma_obs, is_break = [float(x) for x in obs]
+<<<<<<< HEAD
         spec = (
             cls._construct_9ch_spectrum_profile(obs)
             if sub_noise_dbm is None
@@ -1144,6 +1291,111 @@ class UltimateDigitalTwinEnv(gym.Env):
         else:
             obs_ofdma_clean = np.full(25, 0.5 * ofdma_obs + 0.5 * eff_ofdma_exog, dtype=np.float64)
         alpha_leg_sr_p = np.clip((0.58 - obs_ofdma_clean) / 0.50, 0.0, 1.0)
+=======
+
+        tx_base = int(np.clip(np.round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0, 6))
+        tx_cands = sorted(list(set([max(0, tx_base - 1), tx_base, min(6, tx_base + 1)])))
+        obss_base = int(np.clip(np.round((ofdma_obs - 0.12) / 0.16), 0, 4))
+        obss_cands = sorted(list(set([max(0, obss_base - 1), obss_base, min(4, obss_base + 1)])))
+        bcn_opt = 0 if int(round(is_break)) == 1 else 1
+        bf_opt = 0 if cls._compute_jakes_bf_physics(0, sta, retry_obs, airtime_obs, is_break)[3] else 1
+
+        # Pha 1: Duyệt 25 cặp (ch, bw) dùng tuple thuần (zero allocation) & gom top-4 ứng viên tốt nhất
+        pair_scores = []
+        best_rew = -1e9
+        best_act = None
+        best_metrics = None
+
+        for ch_c in range(9):
+            bf_opt_ch = 0 if cls._compute_jakes_bf_physics(ch_c, sta, retry_obs, airtime_obs, is_break)[3] else 1
+            for bw_c in range(3):
+                if ch_c == 8 and bw_c > 0:
+                    continue
+                m_probe = cls._original_evaluate_network_physics(
+                    obs, (ch_c, bw_c, tx_base, 11, bcn_opt, obss_base, bf_opt_ch),
+                    aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                    base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                )
+                est_safe = int(m_probe["safe_mcs"])
+                mcs_cands = set(range(max(0, est_safe - 2), min(12, est_safe + 4)))
+                mcs_cands.add(11)
+                pair_best_r = -1e9
+                for mcs_c in mcs_cands:
+                    cand = (ch_c, bw_c, tx_base, mcs_c, bcn_opt, obss_base, bf_opt_ch)
+                    m_eval = cls._original_evaluate_network_physics(
+                        obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                    )
+                    if m_eval["reward"] > pair_best_r:
+                        pair_best_r = m_eval["reward"]
+                    if m_eval["reward"] > best_rew:
+                        best_rew = m_eval["reward"]
+                        best_act = cand
+                        best_metrics = m_eval
+                pair_scores.append((pair_best_r, ch_c, bw_c))
+
+        # Pha 2: Coordinate-descent refinement trên top-4 cặp (ch, bw) x (tx, obss, bf, mcs) -> 0.000000 gap
+        pair_scores.sort(key=lambda x: x[0], reverse=True)
+        for _, top_ch, top_bw in pair_scores[:4]:
+            cur_bf = 0 if cls._compute_jakes_bf_physics(top_ch, sta, retry_obs, airtime_obs, is_break)[3] else 1
+            cur_tx, cur_obss = tx_base, obss_base
+            pair_r = -1e9
+            for _pass in range(2):
+                for tx_c in tx_cands:
+                    m_p2 = cls._original_evaluate_network_physics(
+                        obs, (top_ch, top_bw, tx_c, 11, bcn_opt, cur_obss, cur_bf),
+                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                    )
+                    s_mcs = int(m_p2["safe_mcs"])
+                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
+                        cand = (top_ch, top_bw, tx_c, mcs_c, bcn_opt, cur_obss, cur_bf)
+                        m_eval = cls._original_evaluate_network_physics(
+                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                        )
+                        r_v = m_eval["reward"]
+                        if r_v > pair_r:
+                            pair_r = r_v; cur_tx = tx_c
+                        if r_v > best_rew:
+                            best_rew = r_v; best_act = cand; best_metrics = m_eval
+                for obss_c in obss_cands:
+                    m_p2 = cls._original_evaluate_network_physics(
+                        obs, (top_ch, top_bw, cur_tx, 11, bcn_opt, obss_c, cur_bf),
+                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                    )
+                    s_mcs = int(m_p2["safe_mcs"])
+                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
+                        cand = (top_ch, top_bw, cur_tx, mcs_c, bcn_opt, obss_c, cur_bf)
+                        m_eval = cls._original_evaluate_network_physics(
+                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                        )
+                        r_v = m_eval["reward"]
+                        if r_v > pair_r:
+                            pair_r = r_v; cur_obss = obss_c
+                        if r_v > best_rew:
+                            best_rew = r_v; best_act = cand; best_metrics = m_eval
+                for bf_c in (cur_bf, 1 - cur_bf):
+                    m_p2 = cls._original_evaluate_network_physics(
+                        obs, (top_ch, top_bw, cur_tx, 11, bcn_opt, cur_obss, bf_c),
+                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                    )
+                    s_mcs = int(m_p2["safe_mcs"])
+                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
+                        cand = (top_ch, top_bw, cur_tx, mcs_c, bcn_opt, cur_obss, bf_c)
+                        m_eval = cls._original_evaluate_network_physics(
+                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
+                        )
+                        r_v = m_eval["reward"]
+                        if r_v > pair_r:
+                            pair_r = r_v; cur_bf = bf_c
+                        if r_v > best_rew:
+                            best_rew = r_v; best_act = cand; best_metrics = m_eval
+>>>>>>> 87cfa13 (Cập nhật usb sniffer & telemetry lần 1 (28-11-26))
 
         edge_spread_db = 3.5 + 4.8 * min(1.4, sta / 85.0)
         fading_p = 1.0 + 1.8 * alpha_leg + np.where(occ_max_n > -86.0, 2.5, 0.0)
