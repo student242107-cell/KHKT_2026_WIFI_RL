@@ -263,7 +263,9 @@ class MultiAPTelemetryETL:
         traffic_airtime = float(np.clip(pps / 7500.0, 0.0, 0.98))
         airtime_util = max(cca_airtime, traffic_airtime)
 
-        # Tỷ lệ retry tính đúng trên số gói TX (không chia cho d_rx để tránh bị pha loãng về 0.001)
+        # Tỷ lệ va chạm (p_c) & OFDMA Ratio trên chế độ `openwrt` là CÁC ĐẠI LƯỢNG ƯỚC LƯỢNG GIÁN TIẾP
+        # (empirical estimators) từ bộ đếm debugfs/iw station dump + survey dump của driver mt76,
+        # trong khi `avg_rssi` và `noise_floor` là phép đo PHY trực tiếp từ kernel nl80211.
         tx_retry_ratio = float(np.clip(d_retries / (d_tx + d_retries), 0.0, 1.0)) if d_tx > 20 else 0.0
         tx_fail_ratio = float(np.clip((d_retries + d_failed * 2.0) / (d_tx + d_retries + d_failed), 0.0, 1.0)) if d_tx > 20 else 0.0
 
@@ -272,7 +274,7 @@ class MultiAPTelemetryETL:
         p_c = float(np.clip(max(tx_fail_ratio, congestion_pc), 0.0, 1.0))
         retry_rate = float(np.clip(max(tx_retry_ratio, p_c * 0.75), 0.0, 1.0))
 
-        # --- Bóc tách động OFDMA Ratio từ trạng thái phần cứng mt76 (iw station dump) ---
+        # --- Ước lượng gián tiếp OFDMA Ratio từ thống kê tốc độ tx/rx driver mt76 (iw station dump) ---
         bitrate_lines = re.findall(r"(?:tx|rx)\s+bitrate:\s*([^\n]+)", station_raw)
         he_lines = [ln for ln in bitrate_lines if ("HE-MCS" in ln or "HE-NSS" in ln)]
         ru_mu_lines = [
@@ -307,6 +309,12 @@ class MultiAPTelemetryETL:
             "sta_count": sta_count,
             "ofdma_ratio": ofdma_ratio,
             "band": band_label,
+            "measurement_provenance": {
+                "avg_rssi": "direct_phy_nl80211_station_dump",
+                "noise_floor": "direct_phy_nl80211_survey_dump_in_use",
+                "p_c": "empirical_estimator_tx_fail_and_cca_busy",
+                "ofdma_ratio": "empirical_estimator_he_bitrate_ru_and_mac_degradation",
+            },
             "phy_sensing": {
                 "he_rate_lines": len(he_lines),
                 "ru_mu_lines": len(ru_mu_lines),
@@ -661,6 +669,12 @@ class MultiAPTelemetryETL:
                         "minute": now.minute,
                         "is_break_time": is_break_time,
                         "zone": self.zone,
+                        "measurement_provenance": {
+                            "avg_rssi": "direct_phy_radiotap_dbm_antsignal",
+                            "noise_floor": "direct_phy_radiotap_dbm_antnoise",
+                            "p_c": "empirical_estimator_sniffed_retry_plus_tshark_loss",
+                            "ofdma_ratio": "direct_phy_radiotap_he_mu_bit24_fraction",
+                        },
                         # PHY Preamble Sensing output
                         "phy_sensing": {
                             "he_su_frames": he_su,

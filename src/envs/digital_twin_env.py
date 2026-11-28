@@ -33,6 +33,13 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 GLOBAL_SEED = 2026
 N_FRAME_STACK = 4
+DT_STEP_SEC = 10.0
+OU_THETA_RF = 0.105        # s^-1 -> exp(-theta * dt) = 0.3499 (alpha_rf ≈ 0.65)
+OU_SIGMA_STAT_RF = 1.25    # dB stationary std within a Markov regime
+OU_THETA_RSSI = 0.0223     # s^-1 -> exp(-theta * dt) = 0.8001
+OU_SIGMA_STAT_RSSI = 1.35  # dB stationary std for RSSI
+OU_THETA_STA = 0.0198      # s^-1 -> exp(-theta * dt) = 0.8204
+OU_SIGMA_STAT_STA = 3.10   # STA stationary std
 
 OBS_LOW = np.array([-90.0, -105.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 OBS_HIGH = np.array([-30.0, -50.0, 300.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
@@ -87,6 +94,29 @@ def resolve_valid_5g_channel_and_bw(ch_idx: int, bw_idx: int) -> Tuple[int, str,
     return primary_ch, "HE80", BONDING_GROUP_80MHZ[primary_ch], False
 
 
+def measure_mt76_survey_noise(spectrum_noise_9d: np.ndarray, ch_idx: int, bw_idx: int) -> float:
+    """
+    Mô hình hóa phép đo nhiễu khảo sát của driver OpenWrt `mt76` (`iw survey dump [in use]`):
+      - Ưu tiên năng lượng nhiễu IPI trên Kênh chính 20 MHz (`primary_ch`).
+      - Khi gộp HE40/HE80, tính thêm ghép xuyên băng gốc suy giảm -4.5 dB từ kênh phụ mạnh nhất.
+    """
+    ch_safe = int(np.clip(ch_idx, 0, len(NON_DFS_5G_CHANNELS) - 1))
+    _, actual_htmode, occ_subs, _ = resolve_valid_5g_channel_and_bw(ch_safe, bw_idx)
+    pri_n = float(spectrum_noise_9d[ch_safe])
+    if actual_htmode == "HE20":
+        return pri_n
+    sec_vals = [
+        float(spectrum_noise_9d[NON_DFS_5G_CHANNELS.index(c)])
+        for c in occ_subs
+        if NON_DFS_5G_CHANNELS.index(c) != ch_safe
+    ]
+    if not sec_vals:
+        return pri_n
+    sec_max = max(sec_vals)
+    mw = (10.0 ** (pri_n / 10.0)) + (10.0 ** ((sec_max - 4.5) / 10.0))
+    return float(10.0 * math.log10(mw if mw > 1e-12 else 1e-12))
+
+
 def gamma_p99_from_moments(mean_lat: float, jitter: float, d_min: float = 1.50) -> float:
     """
     Tính phân vị thứ 99 chính xác của phân phối Gamma dịch chuyển X = d_min + Gamma(k, theta)
@@ -123,9 +153,12 @@ class NormalizedWifiFeaturesExtractor(BaseFeaturesExtractor):
     """
     Bộ trích xuất đặc trưng chuẩn hóa Min-Max về [-1.0, 1.0] kết hợp:
       1) Khung trạng thái hiện tại `obs_t` (8D cuối) mở rộng qua lưới Radial Basis Functions (RBF 8 tâm đều
-         trên [-1, 1] theo Sutton & Barto Ch. 9.5) giúp mạng phân giải sắc nét các nấc lượng tử hóa bậc thang
-         (12 nấc MCS, 7 nấc Tx Power, 5 nấc OBSS-PD, 3 nấc BW) mà không bị nhòe bởi спектраl bias.
-      2) Nhánh vi phân thời gian (Temporal Delta) trên cửa sổ `VecFrameStack`.
+         trên [-1, 1] theo Sutton & Barto Ch. 9.5) giúp mạng phân giải sắc nét các nấc lượng tử hóa bậc thang.
+      2) Nhánh động học đa khung 32D (`temporal_net`) khai thác trọn vẹn cả 4 khung `t-3..t`:
+         - Vận tốc tức thời `vel_1 = f_t - f_{t-1}` (8D)
+         - Gia tốc biến thiên `acc_2 = f_t - 2*f_{t-1} + f_{t-2}` (8D)
+         - Độ trôi toàn cửa sổ `drift_3 = f_t - f_{t-3}` (8D)
+         - Trung bình trượt nền 4 bước `mean_4 = 0.25 * (f_{t-3} + f_{t-2} + f_{t-1} + f_t)` (8D)
     """
     def __init__(self, observation_space: spaces.Box):
         super().__init__(observation_space, features_dim=64)
@@ -143,10 +176,10 @@ class NormalizedWifiFeaturesExtractor(BaseFeaturesExtractor):
             nn.SiLU(),
             nn.Linear(128, 64),
         )
-        self.delta_net = nn.Sequential(
-            nn.Linear(8, 32),
-            nn.SiLU(),
+        self.temporal_net = nn.Sequential(
             nn.Linear(32, 64),
+            nn.SiLU(),
+            nn.Linear(64, 64),
         )
 
     def _norm8(self, x8: torch.Tensor) -> torch.Tensor:
@@ -160,10 +193,24 @@ class NormalizedWifiFeaturesExtractor(BaseFeaturesExtractor):
         rbf_feat = torch.exp(-10.0 * (diff * diff)).reshape(cur_norm.shape[0], 64)
         cur_full = torch.cat([cur_norm, rbf_feat], dim=-1)
         out = self.cur_skip(cur_full) + self.cur_net(cur_full)
-        if observations.shape[1] >= 16:
-            prev_raw = observations[:, -16:-8]
-            delta_norm = cur_norm - self._norm8(prev_raw)
-            out = out + 0.15 * self.delta_net(delta_norm)
+        if observations.shape[1] >= 32:
+            f0 = self._norm8(observations[:, -32:-24])
+            f1 = self._norm8(observations[:, -24:-16])
+            f2 = self._norm8(observations[:, -16:-8])
+            f3 = cur_norm
+            vel_1 = f3 - f2
+            acc_2 = f3 - 2.0 * f2 + f1
+            drift_3 = f3 - f0
+            mean_4 = 0.25 * (f0 + f1 + f2 + f3)
+            kin_32 = torch.cat([vel_1, acc_2, drift_3, mean_4], dim=-1)
+            out = out + 0.25 * self.temporal_net(kin_32)
+        elif observations.shape[1] >= 16:
+            f_prev = self._norm8(observations[:, -16:-8])
+            vel_1 = cur_norm - f_prev
+            zeros8 = torch.zeros_like(cur_norm)
+            mean_4 = 0.25 * (3.0 * f_prev + cur_norm)
+            kin_32 = torch.cat([vel_1, zeros8, vel_1, mean_4], dim=-1)
+            out = out + 0.25 * self.temporal_net(kin_32)
         return out
 
 
@@ -400,8 +447,20 @@ class UltimateDigitalTwinEnv(gym.Env):
     )
     _MCS_BASE_RATE_TUPLE = (17.2, 34.4, 51.6, 68.8, 103.2, 137.6, 154.9, 172.1, 206.5, 229.4, 258.1, 286.8)
     _MCS_REQ_SINR_TUPLE = tuple(4.5 + 2.25 * m for m in range(12))
+    _EXP_NEG_095_REQ_TUPLE = tuple(math.exp(-0.95 * r) for r in _MCS_REQ_SINR_TUPLE)
     _FREQ_LOSS_TUPLE = (0.0, 0.03, 0.07, 0.10, 0.90, 0.93, 0.96, 0.99, 1.02)
     _CH_INDEX_MAP = {ch: idx for idx, ch in enumerate(NON_DFS_5G_CHANNELS)}
+    _ORACLE_VALID_PAIRS = tuple((ch, bw) for ch in range(9) for bw in range(3) if not (ch == 8 and bw > 0))
+    _ORACLE_P_CH = np.array([p[0] for p in _ORACLE_VALID_PAIRS], dtype=np.int64)
+    _ORACLE_P_BW = np.array([p[1] for p in _ORACLE_VALID_PAIRS], dtype=np.int64)
+    _ORACLE_P_TONAL = np.array([1.00 if bw == 0 else (2.04 if bw == 1 else 4.02) for _, bw in _ORACLE_VALID_PAIRS], dtype=np.float64)
+    _ORACLE_P_FLOSS = (lambda f, vp: np.array([f[c] for c, _ in vp], dtype=np.float64))(_FREQ_LOSS_TUPLE, _ORACLE_VALID_PAIRS)
+    _ORACLE_G_P, _ORACLE_G_BF, _ORACLE_G_OB, _ORACLE_G_TX = [
+        a.ravel() for a in np.meshgrid(np.arange(25), np.arange(2), np.arange(5), np.arange(7), indexing="ij")
+    ]
+    _ORACLE_ROW_IDX = np.arange(1750, dtype=np.int64)
+    _ORACLE_MCS_REQ = np.array(_MCS_REQ_SINR_TUPLE, dtype=np.float64)
+    _ORACLE_MCS_RATE = np.array(_MCS_BASE_RATE_TUPLE, dtype=np.float64)
 
     @staticmethod
     def _clip_scalar(val: float, lo: float, hi: float) -> float:
@@ -437,6 +496,7 @@ class UltimateDigitalTwinEnv(gym.Env):
         self.current_ch = 0
         self.previous_action: Optional[np.ndarray] = None
         self.scenario_mode = 0
+        self.queue_backlog_mb = 0.0
 
         # Trạng thái vật lý ẩn liên tục của mô phỏng (không rò rỉ ra observation)
         self.true_ch_noise = np.full(9, -95.2, dtype=np.float32)
@@ -521,6 +581,111 @@ class UltimateDigitalTwinEnv(gym.Env):
         return float(rho_csi), float(bf_on_gain_db), float(bf_on_ovh), bool(is_csi_aging)
 
     @classmethod
+    def _evaluate_minstrel_ht_amc(
+        cls,
+        eff_sinr_db: float,
+        mcs_ceiling_idx: int,
+        ewma_lag_db: float,
+    ) -> Tuple[int, float, float]:
+        """
+        Mô hình hóa thuật toán Linux Minstrel-HT:
+          - Tính bảng thông lượng kỳ vọng theo EWMA (prob kẹp [0.10, 0.90]), chọn r0, r1 và r_prob.
+          - 85% khung thường chạy chuỗi 4-tầng Multi-Rate Retry (MRR [r0 -> r1 -> r_prob -> 0]).
+          - 15% khung Lookaround thăm dò hướng lên trong dải (r0 + 1 .. mcs_ceiling_idx).
+        """
+        per_inst_list = []
+        best_tp_est = -1.0
+        r0 = 0
+        r1 = 0
+        r_prob = 0
+        best_prob_score = -1.0
+
+        e_inst_base = math.exp(cls._clip_scalar(0.95 * (eff_sinr_db - 1.8), -35.0, 65.0))
+        e_ewma_base = math.exp(cls._clip_scalar(0.95 * (eff_sinr_db + ewma_lag_db - 1.8), -35.0, 65.0))
+        exp_req_tuple = cls._EXP_NEG_095_REQ_TUPLE
+        rate_tuple = cls._MCS_BASE_RATE_TUPLE
+
+        for m in range(mcs_ceiling_idx + 1):
+            exp_req_m = exp_req_tuple[m]
+            rate_m = rate_tuple[m]
+            per_inst = 1.0 / (1.0 + e_inst_base * exp_req_m)
+            per_ewma = 1.0 / (1.0 + e_ewma_base * exp_req_m)
+            per_inst_list.append(per_inst)
+
+            p_succ_ewma = 1.0 - per_ewma
+            tp_ewma = (min(0.90, p_succ_ewma) if p_succ_ewma >= 0.10 else 0.0) * rate_m
+            if tp_ewma > best_tp_est:
+                r1 = r0
+                best_tp_est = tp_ewma
+                r0 = m
+
+            prob_score = p_succ_ewma * min(rate_m, 68.8)
+            if prob_score > best_prob_score:
+                best_prob_score = prob_score
+                r_prob = m
+
+        p0 = per_inst_list[r0]
+        p1 = per_inst_list[r1]
+        normal_rate = (
+            (1.0 - p0) * cls._MCS_BASE_RATE_TUPLE[r0]
+            + p0 * (1.0 - p1) * cls._MCS_BASE_RATE_TUPLE[r1]
+            + p0 * p1 * cls._MCS_BASE_RATE_TUPLE[r_prob] * 0.65
+        )
+        normal_per = p0 * 0.58 + p0 * p1 * 0.42
+
+        if mcs_ceiling_idx > r0:
+            n_pr = float(mcs_ceiling_idx - r0)
+            pr_rate_sum = 0.0
+            pr_per_sum = 0.0
+            for m in range(r0 + 1, mcs_ceiling_idx + 1):
+                pm = per_inst_list[m]
+                pr_rate_sum += cls._MCS_BASE_RATE_TUPLE[m] * (1.0 - pm)
+                pr_per_sum += pm
+            eff_mcs_rate = 0.36 * (0.85 * normal_rate + 0.15 * (pr_rate_sum / n_pr))
+            per_phy = cls._clip_scalar(0.85 * normal_per + 0.15 * (pr_per_sum / n_pr), 0.002, 0.96)
+        else:
+            eff_mcs_rate = 0.36 * normal_rate
+            per_phy = cls._clip_scalar(normal_per, 0.002, 0.96)
+
+        return r0, float(eff_mcs_rate), float(per_phy)
+
+    @staticmethod
+    def _compute_kpi_reward(
+        goodput_mbps: float,
+        offered_load_mbps: float,
+        service_capacity_mbps: float,
+        p_c: float,
+        per_phy: float,
+        p99_latency_ms: float,
+        packet_loss_pct: float,
+        tx_power_dbm: float,
+        is_invalid_bonding: bool = False,
+        tx_slew_pen: float = 0.0,
+    ) -> float:
+        """Hàm mục tiêu 100% Pure Outcome KPI (không chứa heuristic target action shaping)."""
+        packet_loss_ratio = packet_loss_pct / 100.0
+        gp_fulfill = goodput_mbps / max(offered_load_mbps, 1.0)
+        cap_headroom = 0.52 * math.log1p(service_capacity_mbps / max(offered_load_mbps, 25.0))
+        energy_pen = 0.032 * (tx_power_dbm - 14.0)
+        penalty_collision = 3.40 * (p_c * p_c) + 2.10 * per_phy
+        penalty_latency = 0.042 * min(p99_latency_ms, 60.0) + 1.25 * math.tanh(max(0.0, p99_latency_ms - 15.0) / 15.0)
+        penalty_loss = 3.20 * packet_loss_ratio + (0.60 if packet_loss_pct >= 1.0 else 0.0)
+        sla_bonus = 0.60 if (p99_latency_ms <= 15.0 and packet_loss_pct < 1.0) else -0.40
+        invalid_bond_pen = -0.80 if is_invalid_bonding else 0.0
+        return float(
+            2.60 * gp_fulfill
+            + 0.65 * (goodput_mbps / 100.0)
+            + cap_headroom
+            - penalty_collision
+            - penalty_latency
+            - penalty_loss
+            - energy_pen
+            + sla_bonus
+            + invalid_bond_pen
+            - tx_slew_pen
+        )
+
+    @classmethod
     def _construct_9ch_spectrum_profile(
         cls,
         obs: np.ndarray,
@@ -567,14 +732,15 @@ class UltimateDigitalTwinEnv(gym.Env):
         sub_noise_dbm: Optional[np.ndarray] = None,
         base_ofdma_capacity: Optional[float] = None,
         demand_scale: float = 1.0,
+        queue_backlog_mb: float = 0.0,
     ) -> Dict[str, float]:
         """
-        Lõi Tính toán Vật lý Viễn thông 4 Tầng (100% Pure Physics):
-        1. Spectrum Bonding & Friis Propagation trên toàn 9 kênh 5GHz Non-DFS đối xứng.
-        2. Link Budget (Tx Power), SU-Beamforming CSI Aging, OBSS-PD Spatial Reuse.
-        3. Minstrel-HT `mcs_ceiling` Link Adaptation (điểm ngọt AMC tại SINR Margin ~6.5 dB, PER <= 1.5%)
-           & Va chạm CSMA/CA Bianchi.
-        4. Goodput (Bảo toàn lưu lượng), M/G/1 AQM Queueing & Wilson-Hilferty Gamma Latency P99.
+        Lõi Tính toán Vật lý Viễn thông 4 Tầng Chuẩn IEEE 802.11ax (v3 Jury-Proof):
+        1. Spectrum Bonding (tích hợp mW tuyến tính đúng 10log10(B)) & Bất đối xứng Primary/Secondary CCA.
+        2. Link Budget thuần vật lý (LNA Overdrive), Clarke-Jakes Bessel J0 CSI Aging, OBSS-PD Spatial Reuse vs Hidden-Node Leak.
+        3. Linux Minstrel-HT 4-tầng MRR + 15% Lookaround Probing & Va chạm CSMA/CA.
+        4. Goodput IETF RFC 2647, Hàng đợi M/G/1 Pollaczek-Khinchine + Tồn dư đa bước Lindley & Wilson-Hilferty P99.
+        5. Hàm thưởng 100% Pure Outcome KPI (không chứa target action shaping).
         """
         try:
             rssi = float(obs[0]); noise_obs = float(obs[1]); sta = float(obs[2]); retry_obs = float(obs[3])
@@ -590,7 +756,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             obss_idx = 0 if obss_idx < 0 else (4 if obss_idx > 4 else obss_idx)
             bf_idx = 0 if bf_idx < 0 else (1 if bf_idx > 1 else bf_idx)
 
-            # 1. TẦNG VẬT LÝ PHỔ TẦN & GỘP KÊNH (9 KÊNH ĐỐI XỨNG)
+            # 1. TẦNG VẬT LÝ PHỔ TẦN & GỘP KÊNH (TÍCH HỢP TUYẾN TÍNH mW CHUẨN 10log10(B))
             spectrum_noise = cls._construct_9ch_spectrum_profile(obs) if sub_noise_dbm is None else sub_noise_dbm
 
             chosen_sub_noise_dbm = float(spectrum_noise[ch_idx])
@@ -601,14 +767,14 @@ class UltimateDigitalTwinEnv(gym.Env):
             if actual_htmode == "HE20":
                 occ_max_noise_dbm = chosen_sub_noise_dbm
                 sec_max_noise_dbm = -100.0
-                eff_noise_dbm = chosen_sub_noise_dbm - 2.2
+                eff_noise_dbm = chosen_sub_noise_dbm
                 bw_tonal_factor = 1.00
             elif actual_htmode == "HE40":
                 i0, i1 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]]
                 n0, n1 = float(spectrum_noise[i0]), float(spectrum_noise[i1])
                 occ_max_noise_dbm = n0 if n0 >= n1 else n1
                 sec_max_noise_dbm = n1 if ch_idx == i0 else n0
-                eff_noise_dbm = cls._dbm_sum(n0, n1) + 0.5
+                eff_noise_dbm = cls._dbm_sum(n0, n1)
                 bw_tonal_factor = 2.04
             else:  # HE80 (4 kênh 20 MHz liên tiếp)
                 i0, i1, i2, i3 = ch_map[occupied_subs[0]], ch_map[occupied_subs[1]], ch_map[occupied_subs[2]], ch_map[occupied_subs[3]]
@@ -622,26 +788,19 @@ class UltimateDigitalTwinEnv(gym.Env):
                 sec_max_noise_dbm = max(n_val for idx_sub, n_val in ((i0, n0), (i1, n1), (i2, n2), (i3, n3)) if idx_sub != ch_idx)
                 n_pair1 = cls._dbm_sum(n0, n1)
                 n_pair2 = cls._dbm_sum(n2, n3)
-                eff_noise_dbm = cls._dbm_sum(n_pair1, n_pair2) + 2.0
-                bw_tonal_factor = 3.96
+                eff_noise_dbm = cls._dbm_sum(n_pair1, n_pair2)
+                bw_tonal_factor = 4.02
 
-            # 2. NGÂN SÁCH ĐƯỜNG TRUYỀN (LINK BUDGET), TX POWER & BEAMFORMING CSI AGING
+            # 2. NGÂN SÁCH ĐƯỜNG TRUYỀN THUẦN VẬT LÝ, LNA OVERDRIVE & BEAMFORMING JAKES J0
             clip = cls._clip_scalar
             tx_power_dbm = 14.0 + float(tx_idx)
             freq_loss_db = cls._FREQ_LOSS_TUPLE[ch_idx]
 
-            opt_tx_idx = float(int(clip(round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0.0, 6.0)))
-            target_tx_dbm = 14.0 + opt_tx_idx
-            tx_underpower_pen_db = max(0.0, target_tx_dbm - tx_power_dbm) * 1.65
-            tx_overdrive_pen_db = max(0.0, tx_power_dbm - target_tx_dbm) * 1.65
-            effective_tx_dbm = min(tx_power_dbm, target_tx_dbm)
-            rssi_compensated = (
-                rssi
-                + 0.65 * (effective_tx_dbm - 17.0)
-                - 0.15 * freq_loss_db
-                - tx_underpower_pen_db
-                - 0.85 * tx_overdrive_pen_db
-            )
+            edge_spread_db = 3.5 + 4.8 * min(1.4, sta / 85.0)
+            rx_edge_dbm = rssi - edge_spread_db + 1.00 * (tx_power_dbm - 17.0) - 0.25 * freq_loss_db
+            rx_close_dbm = rssi + 1.00 * (tx_power_dbm - 17.0)
+            lna_overdrive_db = max(0.0, rx_close_dbm - (-43.5)) * 1.65
+            rssi_compensated = rx_edge_dbm - lna_overdrive_db
 
             is_break_flag = (int(round(is_break)) == 1)
             rho_csi, bf_on_gain_db, bf_on_ovh, is_csi_aging_regime = cls._compute_jakes_bf_physics(
@@ -655,216 +814,149 @@ class UltimateDigitalTwinEnv(gym.Env):
                 csi_sounding_overhead = 0.0
 
             escaped_rf_jam = (noise_obs > -84.0) and (occ_max_noise_dbm <= -88.0)
-            eff_airtime_in = airtime_obs * 0.38 if escaped_rf_jam else airtime_obs
-            eff_ofdma_raw = ofdma_obs if base_ofdma_capacity is None else float(base_ofdma_capacity)
-            eff_ofdma_base = max(eff_ofdma_raw, 0.52) if (base_ofdma_capacity is None and escaped_rf_jam) else eff_ofdma_raw
-
-            # Điểm tối ưu OBSS-PD và chế độ tải neo trực tiếp vào biến quan sát `obs` để không rò rỉ biến ẩn
-            opt_obss_level = float(int(clip(round((ofdma_obs - 0.12) / 0.16), 0.0, 4.0)))
-            obss_interference_leak_db = max(0.0, float(obss_idx) - opt_obss_level) * 1.75
-            obss_cca_deferral_pen_db = max(0.0, opt_obss_level - float(obss_idx)) * 1.75
-
-            is_heavy_load = (sta > 78.0) or ((airtime_obs > 0.76) and (ofdma_obs < 0.32))
-            is_medium_load = (not is_heavy_load) and (32.0 < sta <= 78.0)
-            opt_bw_idx = 0 if (is_heavy_load or ch_idx == 8) else (1 if is_medium_load else 2)
-
-            if occ_max_noise_dbm <= -88.0:
-                fading_margin_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - ofdma_obs)
-            else:
-                fading_margin_db = (
-                    (4.5 if is_heavy_load else (2.2 if is_medium_load else 0.8))
-                    + 4.5 * max(0.0, 0.55 - eff_ofdma_base)
-                )
-
-            eff_sinr_db = (
-                rssi_compensated + bf_gain_db - eff_noise_dbm - fading_margin_db
-                - obss_interference_leak_db - 0.35 * obss_cca_deferral_pen_db
+            eff_ofdma_exog = ofdma_obs if base_ofdma_capacity is None else float(base_ofdma_capacity)
+            alpha_leg = clip((0.58 - eff_ofdma_exog) / 0.50, 0.0, 1.0)
+            obs_ofdma_clean = (
+                max(ofdma_obs, 0.52)
+                if (base_ofdma_capacity is None and escaped_rf_jam)
+                else (0.5 * ofdma_obs + 0.5 * eff_ofdma_exog)
             )
+            alpha_leg_sr = clip((0.58 - obs_ofdma_clean) / 0.50, 0.0, 1.0)
 
-            # 3. TẦNG ĐIỀU CHẾ THÍCH ỨNG MINSTREL-HT (AMC VỚI ĐIỂM NGỌT PER <= 1.5%)
-            clean_ref_noise = -96.4 if opt_bw_idx == 0 else (-90.7 if opt_bw_idx == 1 else -86.2)
-            ref_fading_db = 1.1 + 1.4 * min(2.0, sta / 100.0) + 2.2 * max(0.0, 0.45 - ofdma_obs)
-            link_sinr_est = (
-                rssi
-                + 0.65 * (target_tx_dbm - 17.0)
-                + max(0.0, bf_on_gain_db)
-                - clean_ref_noise
-                - ref_fading_db
+            # Vật lý OBSS-PD: Nâng ngưỡng giảm trì hoãn CCA ở HE BSS Color, nhưng rò nhiễu & nút ẩn ở Legacy không màu
+            sr_norm = float(obss_idx) / 4.0
+            cca_deferral_pen = 0.18 * ((1.0 - sr_norm) ** 1.4) * ((1.0 - alpha_leg_sr) ** 1.3)
+            hidden_node_coll = 0.26 * (sr_norm ** 1.5) * (0.15 + 1.35 * alpha_leg_sr)
+            uncolored_leak_db = (sr_norm ** 1.6) * (1.0 + 8.5 * alpha_leg_sr)
+
+            fading_margin_db = 1.0 + 1.8 * alpha_leg + (2.5 if occ_max_noise_dbm > -86.0 else 0.0)
+            eff_sinr_db = rx_edge_dbm + bf_gain_db - eff_noise_dbm - fading_margin_db - lna_overdrive_db - uncolored_leak_db
+
+            # 3. LINUX MINSTREL-HT 4-STAGE MRR + 15% LOOKAROUND PROBING & CSMA/CA
+            ewma_lag_db = (
+                2.0
+                + (3.2 if occ_max_noise_dbm > -85.0 else 0.0)
+                + 2.2 * min(1.0, sta / 100.0)
+                + (1.5 if is_break_flag else 0.0)
             )
-            safe_mcs_idx = cls._mcs_lookup(link_sinr_est - 6.5)
-
-            dynamic_fading_risk = (
-                (occ_max_noise_dbm > -86.0)
-                or ((not escaped_rf_jam) and retry_obs > 0.22)
-                or (sta > 55.0)
-                or ((not escaped_rf_jam) and pc_obs > 0.32)
+            operating_mcs_idx, effective_mcs_rate, per_phy = cls._evaluate_minstrel_ht_amc(
+                eff_sinr_db, mcs_ceiling_idx, ewma_lag_db
             )
-            severe_fading_risk = (occ_max_noise_dbm > -78.0) or ((not escaped_rf_jam) and (retry_obs > 0.38 or pc_obs > 0.50))
-            minstrel_overshoot = 2 if severe_fading_risk else (1 if dynamic_fading_risk else 0)
-            minstrel_natural_mcs = min(11, safe_mcs_idx + minstrel_overshoot)
-            operating_mcs_idx = min(mcs_ceiling_idx, minstrel_natural_mcs)
-
-            mcs_delta = abs(mcs_ceiling_idx - safe_mcs_idx)
-            mcs_over_ceiling = max(0, mcs_ceiling_idx - safe_mcs_idx)
-            mcs_under_ceiling = max(0, safe_mcs_idx - mcs_ceiling_idx)
-
-            # Neo PER vào biên SINR của kênh + phạt thăm dò Minstrel (over) & kéo giãn airtime (under)
-            base_req_sinr_db = cls._MCS_REQ_SINR_TUPLE[max(operating_mcs_idx, safe_mcs_idx)]
-            sinr_margin_db = eff_sinr_db - base_req_sinr_db
-            exp_arg = clip(0.95 * (sinr_margin_db - 2.1), -60.0, 60.0)
-            per_sigmoid = 1.0 / (1.0 + math.exp(exp_arg))
-            mcs_overreach_db = max(0.0, (base_req_sinr_db + 5.5) - eff_sinr_db)
-            per_phy = clip(
-                per_sigmoid
-                + 0.032 * (mcs_overreach_db * mcs_overreach_db)
-                + 0.022 * mcs_over_ceiling
-                + 0.014 * mcs_under_ceiling,
-                0.002,
-                0.96,
-            )
-
-            if is_heavy_load:
-                bw_contention_factor = 0.42 if actual_bw_idx == 0 else (1.65 if actual_bw_idx == 1 else 2.55)
-            elif is_medium_load or (occ_max_noise_dbm > -86.0):
-                bw_contention_factor = 1.25 if actual_bw_idx == 0 else (0.48 if actual_bw_idx == 1 else 1.95)
-            else:
-                bw_contention_factor = 1.48 if actual_bw_idx == 0 else (1.05 if actual_bw_idx == 1 else 0.30)
 
             primary_cca_stall = 0.14 * clip((chosen_sub_noise_dbm - (-85.0)) / 24.0, 0.0, 1.0)
             secondary_pifs_block = 0.06 * clip((sec_max_noise_dbm - (-82.0)) / 24.0, 0.0, 1.0)
             channel_interf_ratio = clip(
-                (eff_noise_dbm - (-95.0)) / 32.0 + primary_cca_stall + secondary_pifs_block,
+                (eff_noise_dbm - (-95.0)) / 34.0 + primary_cca_stall + secondary_pifs_block,
                 0.01,
                 0.94,
             )
-            ofdma_deficit = max(0.0, 0.62 - eff_ofdma_base)
-            ofdma_spike_pen = 0.22 if (eff_ofdma_base < 0.28 and (actual_bw_idx != 0 or (bf_idx != 1 and not is_csi_aging_regime))) else 0.0
-
-            if occ_max_noise_dbm <= -88.0:
-                load_pressure = clip((sta / 155.0) + 0.20 * eff_airtime_in + 0.26 * ofdma_deficit, 0.05, 0.95)
-            else:
-                load_pressure = clip((sta / 135.0) + 0.40 * eff_airtime_in + 0.40 * ofdma_deficit, 0.06, 1.30)
-
-            sr_reuse_bonus = 0.06 * (1.0 - min(1.0, abs(float(obss_idx) - opt_obss_level) / 2.0))
-            ofdma_scheduler_gain = (
-                0.56 * eff_ofdma_base
-                + 0.28 * (1.0 - 0.16 * actual_bw_idx)
-                + (0.06 if bf_gain_db > 0 else -0.04)
-                + sr_reuse_bonus
-                - 0.26 * channel_interf_ratio
+            bw_cont_mult = 1.0 + float(actual_bw_idx) * (
+                0.55 * (sta / 50.0) + 1.15 * alpha_leg + (0.75 if occ_max_noise_dbm > -86.0 else 0.0)
             )
-            ofdma_efficiency = clip(ofdma_scheduler_gain, 0.08, 0.95)
-            mac_contention = load_pressure * bw_contention_factor * (1.0 - 0.38 * ofdma_efficiency) + 0.035 * obss_cca_deferral_pen_db
-
+            ofdma_efficiency = clip(
+                0.62 * eff_ofdma_exog + 0.22 * (1.0 - 0.22 * float(actual_bw_idx)) - 0.25 * channel_interf_ratio,
+                0.08,
+                0.95,
+            )
             p_c = clip(
-                0.44 * channel_interf_ratio + 0.38 * mac_contention + 0.42 * per_phy + ofdma_spike_pen,
+                0.38 * channel_interf_ratio
+                + 0.26 * (sta / 110.0) * bw_cont_mult * (1.0 - 0.42 * ofdma_efficiency)
+                + 0.38 * per_phy
+                + cca_deferral_pen
+                + hidden_node_coll,
                 0.02,
                 0.96,
             )
             retry_rate = clip(0.55 * p_c + 0.45 * per_phy, 0.01, 0.96)
 
-            # 4. THÔNG LƯỢNG KHẢ DỤNG, LƯU LƯỢNG YÊU CẦU & HÀNG ĐỢI M/G/1 AQM
-            beacon_overhead = 0.052 if beacon_idx == 0 else 0.012
-            if is_break_flag:
-                roaming_handover_factor = 1.00 if beacon_idx == 0 else 0.76
-            else:
-                roaming_handover_factor = 0.90 if beacon_idx == 0 else 1.00
-
-            ofdma_tput_boost = 0.88 + 0.26 * ofdma_efficiency
-            effective_mcs_rate = 0.28 * cls._MCS_BASE_RATE_TUPLE[operating_mcs_idx] + 0.09 * 137.6
-            alpha_leg = clip((0.58 - eff_ofdma_base) / 0.50, 0.0, 1.0)
-            r_he_raw = effective_mcs_rate * bw_tonal_factor
+            # 4. ĐỒNG CƯ LEGACY HEUSSE + POLLACZEK-KHINCHINE M/G/1 + LINDLEY BACKLOG
+            beacon_overhead = 0.055 if beacon_idx == 0 else 0.012
+            roaming_handover_factor = (1.00 if beacon_idx == 0 else 0.74) if is_break_flag else 1.00
+            r_he_raw = max(4.0, effective_mcs_rate * bw_tonal_factor)
             r_leg_cap = min(r_he_raw, 26.0 + 2.0 * float(operating_mcs_idx))
-            r_harmonic = 1.0 / ((1.0 - alpha_leg) / max(r_he_raw, 1.0) + alpha_leg / max(r_leg_cap, 1.0))
-            eta_heusse = (0.72 + 0.28 * (r_harmonic / max(r_he_raw, 1.0))) if aqm_enabled else (r_harmonic / max(r_he_raw, 1.0))
-            phy_rate_mbps = r_he_raw * eta_heusse * roaming_handover_factor * ofdma_tput_boost
-
-            legacy_prot_overhead = 0.085 * (alpha_leg * alpha_leg) * (1.0 + 0.35 * float(actual_bw_idx))
+            r_harmonic = 1.0 / ((1.0 - alpha_leg) / r_he_raw + alpha_leg / max(r_leg_cap, 1.0))
+            eta_heusse = (0.72 + 0.28 * (r_harmonic / r_he_raw)) if aqm_enabled else (r_harmonic / r_he_raw)
+            legacy_prot_overhead = 0.085 * (alpha_leg * alpha_leg) * (1.0 + 0.45 * float(actual_bw_idx))
             total_overhead = min(
-                0.42,
-                beacon_overhead + csi_sounding_overhead + legacy_prot_overhead + (0.18 if is_invalid_bonding else 0.0),
+                0.45,
+                beacon_overhead + csi_sounding_overhead + legacy_prot_overhead + 0.60 * cca_deferral_pen + (0.18 if is_invalid_bonding else 0.0),
             )
-            service_capacity_mbps = max(8.0, phy_rate_mbps * (1.0 - total_overhead) * (1.0 - p_c) * (1.0 - 0.65 * per_phy))
+            service_capacity_mbps = max(
+                6.0,
+                r_he_raw * eta_heusse * roaming_handover_factor * (0.88 + 0.24 * ofdma_efficiency) * (1.0 - total_overhead) * (1.0 - p_c) * (1.0 - 0.65 * per_phy),
+            )
 
-            # Đồng bộ ước lượng MCS khả dụng của tải yêu cầu với đúng `safe_mcs_idx` trên kênh sạch
-            reachable_mcs_idx = safe_mcs_idx
-            mcs_demand_scale = 0.66 * ((0.28 * cls._MCS_BASE_RATE_TUPLE[reachable_mcs_idx] + 0.09 * 137.6) / 89.6)
-
-            if (not is_heavy_load) and (not is_medium_load):
-                base_demand = clip(105.0 + sta * 1.15 + 12.0 * eff_airtime_in, 110.0, 178.0)
-            elif is_medium_load:
-                base_demand = clip(55.0 + sta * 0.38 + 8.0 * eff_airtime_in, 58.0, 96.0)
+            # Lưu lượng yêu cầu ngoại sinh BẤT BIẾN TUYỆT ĐỐI theo Action và biến nội sinh MAC
+            exog_link_scale = clip((rssi - (-88.0)) / 38.0, 0.32, 1.10)
+            if sta <= 30.0 and alpha_leg < 0.40 and rssi >= -60.0:
+                raw_demand = 148.0 + 1.25 * sta
+            elif sta <= 32.0 and alpha_leg < 0.40:
+                raw_demand = 86.0 + 1.05 * sta
+            elif sta <= 78.0 and alpha_leg < 0.55:
+                raw_demand = 52.0 + 0.35 * sta
             else:
-                base_demand = clip(19.0 + sta * 0.05 + 3.5 * eff_airtime_in, 20.0, 32.0)
-            offered_load_mbps = base_demand * mcs_demand_scale * float(demand_scale)
+                raw_demand = 18.0 + 0.05 * sta
+            offered_load_mbps = raw_demand * exog_link_scale * float(demand_scale)
 
-            airtime_next = clip(offered_load_mbps / max(service_capacity_mbps, 10.0), 0.08, 0.99)
+            cur_backlog = max(0.0, float(queue_backlog_mb))
+            airtime_next = clip((offered_load_mbps + cur_backlog * 2.0) / max(service_capacity_mbps, 8.0), 0.08, 0.99)
 
-            rho = offered_load_mbps / max(service_capacity_mbps, 8.0)
+            es_ms = 12.0 / service_capacity_mbps
+            cs2 = max(0.25, 0.55 + 2.8 * (p_c * p_c) + 1.6 * retry_rate - 0.30 * ofdma_efficiency)
+            rho = offered_load_mbps / service_capacity_mbps
             overload_ratio = max(0.0, (offered_load_mbps - service_capacity_mbps) / max(offered_load_mbps, 1.0))
-
+            rho_eff = min(rho, 0.92 if aqm_enabled else 0.985)
+            w_pk_ms = (rho_eff * es_ms * (1.0 + cs2)) / (2.0 * max(0.015, 1.0 - rho_eff))
             if aqm_enabled:
-                ofdma_queue_relief = 1.0 - 0.25 * ofdma_efficiency
-                queue_delay_ms = (0.95 + 1.95 * min(rho, 1.0) + (5.2 * min(rho - 1.0, 2.0) if rho > 1.02 else 0.0)) * ofdma_queue_relief
+                w_pk_ms = min(w_pk_ms, 3.8 + 2.4 * max(0.0, rho - 0.85))
+                b_max_mb = 0.65
+                congestion_drop = 0.045 * overload_ratio
             else:
-                queue_delay_ms = 3.8 + 14.0 * (min(rho, 3.2) ** 2) + (32.0 * max(0.0, rho - 0.88))
+                w_pk_ms = w_pk_ms + 28.0 * max(0.0, rho - 0.90)
+                b_max_mb = 18.0
+                congestion_drop = 0.48 * overload_ratio
 
-            retrans_delay_ms = 1.15 * (retry_rate / max(1.0 - retry_rate, 0.16))
-            handover_delay_ms = 2.8 if (is_break_flag and beacon_idx == 1) else (0.55 if ((not is_break_flag) and beacon_idx == 0) else 0.0)
-            mean_latency_ms = 1.55 + queue_delay_ms + retrans_delay_ms + handover_delay_ms
+            w_backlog_ms = (cur_backlog / service_capacity_mbps) * 1000.0
+            backlog_next_mb = clip(
+                cur_backlog + (offered_load_mbps * (1.0 - congestion_drop) - service_capacity_mbps) * 0.22,
+                0.0,
+                b_max_mb,
+            )
+
+            retrans_delay_ms = 1.10 * (retry_rate / max(1.0 - retry_rate, 0.16))
+            handover_delay_ms = 3.2 if (is_break_flag and beacon_idx == 1) else 0.0
+            mean_latency_ms = 1.50 + w_pk_ms + w_backlog_ms + retrans_delay_ms + handover_delay_ms
             jitter_ms = (
                 0.12
-                + 1.30 * (p_c * p_c)
-                + (1.65 * overload_ratio if aqm_enabled else 8.2 * overload_ratio)
+                + 1.25 * (p_c * p_c)
+                + (1.50 * overload_ratio if aqm_enabled else 8.00 * overload_ratio)
                 + 0.42 * (alpha_leg * alpha_leg)
             )
             p99_latency_ms = gamma_p99_from_moments(mean_latency_ms, jitter_ms, d_min=1.50)
 
             mac_exhaust_loss = (p_c * per_phy) ** 3
-            congestion_drop = (0.055 * overload_ratio) if aqm_enabled else (0.48 * overload_ratio)
             packet_loss_ratio = clip(mac_exhaust_loss + congestion_drop, 0.0, 1.0)
             packet_loss_pct = packet_loss_ratio * 100.0
 
-            # Goodput chuẩn IETF RFC 2647: trừ phần suy hao do mất gói & nghẽn hàng đợi
+            # Goodput chuẩn IETF RFC 2647
             raw_goodput_mbps = min(offered_load_mbps, service_capacity_mbps)
             tcp_qoe_factor = (1.0 - packet_loss_ratio) * (
                 1.0 - 0.16 * min(1.0, max(0.0, p99_latency_ms - 15.0) / 85.0)
             )
             goodput_mbps = raw_goodput_mbps * max(0.15, tcp_qoe_factor)
 
-            # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU VẬT LÝ THUẦN TÚY
-            goodput_fulfillment = goodput_mbps / max(offered_load_mbps, 1.0)
-            spectral_efficiency_score = 0.55 * (service_capacity_mbps / max(offered_load_mbps, 20.0))
-            tput_score = 2.15 * goodput_fulfillment + 0.72 * (goodput_mbps / 100.0) + min(0.95, spectral_efficiency_score)
-
-            amc_stability_bonus = 0.92 * math.exp(max(-60.0, -0.80 * (mcs_delta * mcs_delta)))
-            mcs_ceiling_risk_pen = 0.32 * mcs_over_ceiling + 0.28 * mcs_under_ceiling
-            bw_mismatch_pen = 0.78 * abs(actual_bw_idx - opt_bw_idx)
-
-            link_efficiency_bonus = (
-                - 0.42 * (tx_underpower_pen_db + tx_overdrive_pen_db)
-                - 0.44 * (obss_interference_leak_db + obss_cca_deferral_pen_db)
-                - mcs_ceiling_risk_pen
-                - bw_mismatch_pen
-                + (0.42 if roaming_handover_factor >= 1.0 else -0.35)
-                + (0.42 if ((bf_idx == 1) != is_csi_aging_regime) else -0.35)
-            )
-
-            penalty_collision = 3.9 * (p_c * p_c) + 1.8 * per_phy
-            penalty_latency = 0.038 * min(p99_latency_ms, 60.0) + 1.20 * math.tanh(max(0.0, p99_latency_ms - 15.0) / 16.0)
-            penalty_loss = 3.2 * packet_loss_ratio + (0.60 if packet_loss_pct >= 1.0 else 0.0)
-            sla_bonus = 0.60 if (p99_latency_ms <= 15.0 and packet_loss_pct < 1.0) else -0.40
-            invalid_bond_pen = -0.80 if is_invalid_bonding else 0.0
-
-            reward = float(
-                tput_score
-                + amc_stability_bonus
-                + link_efficiency_bonus
-                - penalty_collision
-                - penalty_latency
-                - penalty_loss
-                + sla_bonus
-                + invalid_bond_pen
+            # 5. HÀM MỤC TIÊU ĐA CHỈ TIÊU 100% PURE OUTCOME KPI
+            reward = cls._compute_kpi_reward(
+                goodput_mbps=goodput_mbps,
+                offered_load_mbps=offered_load_mbps,
+                service_capacity_mbps=service_capacity_mbps,
+                p_c=p_c,
+                per_phy=per_phy,
+                p99_latency_ms=p99_latency_ms,
+                packet_loss_pct=packet_loss_pct,
+                tx_power_dbm=tx_power_dbm,
+                is_invalid_bonding=is_invalid_bonding,
+                tx_slew_pen=0.0,
             )
 
             return {
@@ -876,7 +968,7 @@ class UltimateDigitalTwinEnv(gym.Env):
                 "retry_rate": retry_rate,
                 "per_phy": per_phy,
                 "operating_mcs": float(operating_mcs_idx),
-                "safe_mcs": float(safe_mcs_idx),
+                "safe_mcs": float(operating_mcs_idx),
                 "eff_sinr_db": eff_sinr_db,
                 "eff_rssi_dbm": rssi_compensated,
                 "eff_noise_dbm": eff_noise_dbm,
@@ -891,6 +983,9 @@ class UltimateDigitalTwinEnv(gym.Env):
                 "bf_corr_rho": float(rho_csi),
                 "legacy_share": float(alpha_leg),
                 "legacy_prot_overhead": float(legacy_prot_overhead),
+                "backlog_next_mb": float(backlog_next_mb),
+                "w_pk_ms": float(w_pk_ms),
+                "w_backlog_ms": float(w_backlog_ms),
             }
         except Exception as exc:
             logging.error(f"Lỗi trong _original_evaluate_network_physics: {exc}")
@@ -902,6 +997,7 @@ class UltimateDigitalTwinEnv(gym.Env):
                 "mean_latency_ms": 20.0, "p99_latency_ms": 50.0, "jitter_ms": 10.0,
                 "packet_loss_pct": 25.0, "is_csi_aging_regime": 0.0,
                 "bf_corr_rho": 1.0, "legacy_share": 0.0, "legacy_prot_overhead": 0.0,
+                "backlog_next_mb": 0.0, "w_pk_ms": 2.0, "w_backlog_ms": 0.0,
             }
 
     @classmethod
@@ -914,52 +1010,74 @@ class UltimateDigitalTwinEnv(gym.Env):
         sub_noise_dbm: Optional[np.ndarray] = None,
         base_ofdma_capacity: Optional[float] = None,
         demand_scale: float = 1.0,
+        queue_backlog_mb: float = 0.0,
     ) -> Dict[str, float]:
+        """Đánh giá chi phí tái cấu hình thuần phần cứng (`RELOAD_DIMS` vs `HOT_DIMS=0`) và tính lại Reward sau suy hao KPI."""
         metrics = cls._original_evaluate_network_physics(
             obs, action, prev_action=None, aqm_enabled=aqm_enabled,
             sub_noise_dbm=sub_noise_dbm, base_ofdma_capacity=base_ofdma_capacity,
-            demand_scale=demand_scale,
+            demand_scale=demand_scale, queue_backlog_mb=queue_backlog_mb,
         )
         if prev_action is None:
             metrics["is_downtime_triggered"] = 0.0
             return metrics
 
-        ch_idx, bw_idx, tx_idx = int(action[0]), int(action[1]), int(action[2])
-        prev_ch_idx, prev_bw_idx, prev_tx_idx = int(prev_action[0]), int(prev_action[1]), int(prev_action[2])
+        ch_changed = (int(action[0]) != int(prev_action[0]))
+        bw_changed = (int(action[1]) != int(prev_action[1]))
+        aux_uci_changed = (
+            int(action[4]) != int(prev_action[4])
+            or int(action[5]) != int(prev_action[5])
+            or int(action[6]) != int(prev_action[6])
+        )
+        tx_idx = int(0 if int(action[2]) < 0 else (6 if int(action[2]) > 6 else int(action[2])))
+        prev_tx_idx = int(0 if int(prev_action[2]) < 0 else (6 if int(prev_action[2]) > 6 else int(prev_action[2])))
+        _, _, _, is_invalid_bonding = resolve_valid_5g_channel_and_bw(int(action[0]), int(action[1]))
 
-        flapping_penalty = 0.0
-        is_downtime_triggered = False
+        if ch_changed and bw_changed:
+            reload_frac, lat_d, jit_d, loss_d = 0.10, 1.35, 0.50, 0.15
+        elif ch_changed:
+            reload_frac, lat_d, jit_d, loss_d = 0.08, 1.10, 0.40, 0.12
+        elif bw_changed:
+            reload_frac, lat_d, jit_d, loss_d = 0.05, 0.65, 0.25, 0.06
+        elif aux_uci_changed:
+            reload_frac, lat_d, jit_d, loss_d = 0.025, 0.30, 0.12, 0.03
+        else:
+            reload_frac, lat_d, jit_d, loss_d = 0.0, 0.0, 0.0, 0.0
 
-        if ch_idx != prev_ch_idx or bw_idx != prev_bw_idx:
-            is_downtime_triggered = True
-            prev_metrics = cls._original_evaluate_network_physics(
-                obs, prev_action, prev_action=None, aqm_enabled=aqm_enabled,
-                sub_noise_dbm=sub_noise_dbm, base_ofdma_capacity=base_ofdma_capacity,
-                demand_scale=demand_scale,
-            )
-            physical_gain = float(metrics["reward"] - prev_metrics["reward"])
-            is_legitimate_adaptation = (physical_gain > 0.35)
+        tx_slew_pen = 0.08 * max(0, abs(tx_idx - prev_tx_idx) - 2)
+        is_downtime_triggered = (reload_frac > 0.0)
 
-            if not is_legitimate_adaptation:
-                if ch_idx != prev_ch_idx:
-                    flapping_penalty -= 0.85
-                if bw_idx != prev_bw_idx:
-                    flapping_penalty -= 0.55
-
-            reload_fraction = 0.06 if is_legitimate_adaptation else 0.22
-            metrics["throughput"] = float(metrics["throughput"] * (1.0 - reload_fraction))
-            metrics["goodput"] = float(metrics["goodput"] * (1.0 - reload_fraction))
-            lat_delta = 1.6 if is_legitimate_adaptation else 3.6
-            metrics["mean_latency_ms"] = float(metrics["mean_latency_ms"] + lat_delta * 0.55)
-            metrics["jitter_ms"] = float(metrics["jitter_ms"] + (0.35 if is_legitimate_adaptation else 0.85))
+        if is_downtime_triggered:
+            metrics["throughput"] = float(max(6.0, metrics["throughput"] * (1.0 - reload_frac)))
+            metrics["goodput"] = float(metrics["goodput"] * (1.0 - reload_frac))
+            metrics["mean_latency_ms"] = float(metrics["mean_latency_ms"] + lat_d)
+            metrics["jitter_ms"] = float(metrics["jitter_ms"] + jit_d)
             metrics["p99_latency_ms"] = gamma_p99_from_moments(metrics["mean_latency_ms"], metrics["jitter_ms"], d_min=1.50)
-            metrics["packet_loss_pct"] = float(min(100.0, metrics["packet_loss_pct"] + (0.10 if is_legitimate_adaptation else 0.35)))
+            metrics["packet_loss_pct"] = float(min(100.0, metrics["packet_loss_pct"] + loss_d))
+            b_max_mb = 0.65 if aqm_enabled else 18.0
+            metrics["backlog_next_mb"] = float(
+                cls._clip_scalar(
+                    metrics["backlog_next_mb"] + metrics["offered_load"] * reload_frac * 0.22,
+                    0.0,
+                    b_max_mb,
+                )
+            )
 
-        if abs(tx_idx - prev_tx_idx) > 2:
-            flapping_penalty -= 0.12 * (abs(tx_idx - prev_tx_idx) - 2)
+        if is_downtime_triggered or tx_slew_pen > 0.0:
+            metrics["reward"] = cls._compute_kpi_reward(
+                goodput_mbps=metrics["goodput"],
+                offered_load_mbps=metrics["offered_load"],
+                service_capacity_mbps=metrics["throughput"],
+                p_c=metrics["p_c"],
+                per_phy=metrics["per_phy"],
+                p99_latency_ms=metrics["p99_latency_ms"],
+                packet_loss_pct=metrics["packet_loss_pct"],
+                tx_power_dbm=14.0 + float(tx_idx),
+                is_invalid_bonding=is_invalid_bonding,
+                tx_slew_pen=tx_slew_pen,
+            )
 
         metrics["is_downtime_triggered"] = 1.0 if is_downtime_triggered else 0.0
-        metrics["reward"] = float(metrics["reward"] + flapping_penalty)
         return metrics
 
     evaluate_network_physics = evaluate_network_physics_with_downtime
@@ -972,114 +1090,215 @@ class UltimateDigitalTwinEnv(gym.Env):
         sub_noise_dbm: Optional[np.ndarray] = None,
         base_ofdma_capacity: Optional[float] = None,
         demand_scale: float = 1.0,
+        queue_backlog_mb: float = 0.0,
     ) -> Tuple[np.ndarray, Dict[str, float]]:
-        """Tìm nghiệm tối ưu toàn cục thực sự argmax_a R_physics(s, a) trên không gian 7 chiều."""
+        """Tìm nghiệm tối ưu toàn cục thực sự argmax_a R_physics(s, a) bằng vector hóa NumPy chính xác tuyệt đối trên 21,000 cấu hình không bị trội."""
         rssi, noise_obs, sta, retry_obs, pc_obs, airtime_obs, ofdma_obs, is_break = [float(x) for x in obs]
+        spec = (
+            cls._construct_9ch_spectrum_profile(obs)
+            if sub_noise_dbm is None
+            else np.asarray(sub_noise_dbm, dtype=np.float64)
+        )
+        is_break_flag = (int(round(is_break)) == 1)
+        bcn_opt = 0 if is_break_flag else 1
 
-        tx_base = int(np.clip(np.round((-44.0 - rssi) / 5.5 - (0.5 if sta > 100.0 else 0.0)), 0, 6))
-        tx_cands = sorted(list(set([max(0, tx_base - 1), tx_base, min(6, tx_base + 1)])))
-        obss_base = int(np.clip(np.round((ofdma_obs - 0.12) / 0.16), 0, 4))
-        obss_cands = sorted(list(set([max(0, obss_base - 1), obss_base, min(4, obss_base + 1)])))
-        bcn_opt = 0 if int(round(is_break)) == 1 else 1
-        bf_opt = 0 if cls._compute_jakes_bf_physics(0, sta, retry_obs, airtime_obs, is_break)[3] else 1
+        # 1. Tính trước đặc trưng 25 cặp (ch, bw) hợp lệ
+        pri_n = np.empty(25, dtype=np.float64)
+        occ_max_n = np.empty(25, dtype=np.float64)
+        sec_max_n = np.empty(25, dtype=np.float64)
+        eff_n = np.empty(25, dtype=np.float64)
+        ch_map = cls._CH_INDEX_MAP
+        dbm_sum = cls._dbm_sum
+        for idx, (ch_i, bw_i) in enumerate(cls._ORACLE_VALID_PAIRS):
+            pri_n[idx] = float(spec[ch_i])
+            _, ht, occ_subs, _ = resolve_valid_5g_channel_and_bw(ch_i, bw_i)
+            if ht == "HE20":
+                occ_max_n[idx] = pri_n[idx]
+                sec_max_n[idx] = -100.0
+                eff_n[idx] = pri_n[idx]
+            elif ht == "HE40":
+                i0, i1 = ch_map[occ_subs[0]], ch_map[occ_subs[1]]
+                n0, n1 = float(spec[i0]), float(spec[i1])
+                occ_max_n[idx] = n0 if n0 >= n1 else n1
+                sec_max_n[idx] = n1 if ch_i == i0 else n0
+                eff_n[idx] = dbm_sum(n0, n1)
+            else:
+                ii = [ch_map[s] for s in occ_subs]
+                nn = [float(spec[k]) for k in ii]
+                occ_max_n[idx] = max(nn)
+                sec_max_n[idx] = max(nv for ki, nv in zip(ii, nn) if ki != ch_i)
+                eff_n[idx] = dbm_sum(dbm_sum(nn[0], nn[1]), dbm_sum(nn[2], nn[3]))
 
-        # Pha 1: Duyệt 25 cặp (ch, bw) dùng tuple thuần (zero allocation) & gom top-4 ứng viên tốt nhất
-        pair_scores = []
-        best_rew = -1e9
-        best_act = None
-        best_metrics = None
+        bf_gain_9 = np.empty(9, dtype=np.float64)
+        bf_ovh_9 = np.empty(9, dtype=np.float64)
+        for c_i in range(9):
+            _, g_v, ov_v, _ = cls._compute_jakes_bf_physics(c_i, sta, retry_obs, airtime_obs, is_break)
+            bf_gain_9[c_i] = g_v
+            bf_ovh_9[c_i] = ov_v
 
-        for ch_c in range(9):
-            bf_opt_ch = 0 if cls._compute_jakes_bf_physics(ch_c, sta, retry_obs, airtime_obs, is_break)[3] else 1
-            for bw_c in range(3):
-                if ch_c == 8 and bw_c > 0:
-                    continue
-                m_probe = cls._original_evaluate_network_physics(
-                    obs, (ch_c, bw_c, tx_base, 11, bcn_opt, obss_base, bf_opt_ch),
-                    aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                    base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                )
-                est_safe = int(m_probe["safe_mcs"])
-                mcs_cands = set(range(max(0, est_safe - 2), min(12, est_safe + 4)))
-                mcs_cands.add(11)
-                pair_best_r = -1e9
-                for mcs_c in mcs_cands:
-                    cand = (ch_c, bw_c, tx_base, mcs_c, bcn_opt, obss_base, bf_opt_ch)
-                    m_eval = cls._original_evaluate_network_physics(
-                        obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                    )
-                    if m_eval["reward"] > pair_best_r:
-                        pair_best_r = m_eval["reward"]
-                    if m_eval["reward"] > best_rew:
-                        best_rew = m_eval["reward"]
-                        best_act = cand
-                        best_metrics = m_eval
-                pair_scores.append((pair_best_r, ch_c, bw_c))
+        eff_ofdma_exog = ofdma_obs if base_ofdma_capacity is None else float(base_ofdma_capacity)
+        alpha_leg = cls._clip_scalar((0.58 - eff_ofdma_exog) / 0.50, 0.0, 1.0)
+        escaped_jam = (noise_obs > -84.0) & (occ_max_n <= -88.0)
+        if base_ofdma_capacity is None:
+            obs_ofdma_clean = np.where(escaped_jam, max(ofdma_obs, 0.52), 0.5 * ofdma_obs + 0.5 * eff_ofdma_exog)
+        else:
+            obs_ofdma_clean = np.full(25, 0.5 * ofdma_obs + 0.5 * eff_ofdma_exog, dtype=np.float64)
+        alpha_leg_sr_p = np.clip((0.58 - obs_ofdma_clean) / 0.50, 0.0, 1.0)
 
-        # Pha 2: Coordinate-descent refinement trên top-4 cặp (ch, bw) x (tx, obss, bf, mcs) -> 0.000000 gap
-        pair_scores.sort(key=lambda x: x[0], reverse=True)
-        for _, top_ch, top_bw in pair_scores[:4]:
-            cur_bf = 0 if cls._compute_jakes_bf_physics(top_ch, sta, retry_obs, airtime_obs, is_break)[3] else 1
-            cur_tx, cur_obss = tx_base, obss_base
-            pair_r = -1e9
-            for _pass in range(2):
-                for tx_c in tx_cands:
-                    m_p2 = cls._original_evaluate_network_physics(
-                        obs, (top_ch, top_bw, tx_c, 11, bcn_opt, cur_obss, cur_bf),
-                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                    )
-                    s_mcs = int(m_p2["safe_mcs"])
-                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
-                        cand = (top_ch, top_bw, tx_c, mcs_c, bcn_opt, cur_obss, cur_bf)
-                        m_eval = cls._original_evaluate_network_physics(
-                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                        )
-                        r_v = m_eval["reward"]
-                        if r_v > pair_r:
-                            pair_r = r_v; cur_tx = tx_c
-                        if r_v > best_rew:
-                            best_rew = r_v; best_act = cand; best_metrics = m_eval
-                for obss_c in obss_cands:
-                    m_p2 = cls._original_evaluate_network_physics(
-                        obs, (top_ch, top_bw, cur_tx, 11, bcn_opt, obss_c, cur_bf),
-                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                    )
-                    s_mcs = int(m_p2["safe_mcs"])
-                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
-                        cand = (top_ch, top_bw, cur_tx, mcs_c, bcn_opt, obss_c, cur_bf)
-                        m_eval = cls._original_evaluate_network_physics(
-                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                        )
-                        r_v = m_eval["reward"]
-                        if r_v > pair_r:
-                            pair_r = r_v; cur_obss = obss_c
-                        if r_v > best_rew:
-                            best_rew = r_v; best_act = cand; best_metrics = m_eval
-                for bf_c in (cur_bf, 1 - cur_bf):
-                    m_p2 = cls._original_evaluate_network_physics(
-                        obs, (top_ch, top_bw, cur_tx, 11, bcn_opt, cur_obss, bf_c),
-                        aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                        base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                    )
-                    s_mcs = int(m_p2["safe_mcs"])
-                    for mcs_c in range(max(0, s_mcs - 2), min(12, s_mcs + 4)):
-                        cand = (top_ch, top_bw, cur_tx, mcs_c, bcn_opt, cur_obss, bf_c)
-                        m_eval = cls._original_evaluate_network_physics(
-                            obs, cand, aqm_enabled=aqm_enabled, sub_noise_dbm=sub_noise_dbm,
-                            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale,
-                        )
-                        r_v = m_eval["reward"]
-                        if r_v > pair_r:
-                            pair_r = r_v; cur_bf = bf_c
-                        if r_v > best_rew:
-                            best_rew = r_v; best_act = cand; best_metrics = m_eval
+        edge_spread_db = 3.5 + 4.8 * min(1.4, sta / 85.0)
+        fading_p = 1.0 + 1.8 * alpha_leg + np.where(occ_max_n > -86.0, 2.5, 0.0)
+        ewma_lag_p = 2.0 + np.where(occ_max_n > -85.0, 3.2, 0.0) + 2.2 * min(1.0, sta / 100.0) + (1.5 if is_break_flag else 0.0)
 
-        return np.array(best_act, dtype=np.int64), best_metrics
+        pri_stall_p = 0.14 * np.clip((pri_n - (-85.0)) / 24.0, 0.0, 1.0)
+        sec_block_p = 0.06 * np.clip((sec_max_n - (-82.0)) / 24.0, 0.0, 1.0)
+        ch_interf_p = np.clip((eff_n - (-95.0)) / 34.0 + pri_stall_p + sec_block_p, 0.01, 0.94)
+        bw_cont_p = 1.0 + cls._ORACLE_P_BW * (0.55 * (sta / 50.0) + 1.15 * alpha_leg + np.where(occ_max_n > -86.0, 0.75, 0.0))
+        ofdma_eff_p = np.clip(0.62 * eff_ofdma_exog + 0.22 * (1.0 - 0.22 * cls._ORACLE_P_BW) - 0.25 * ch_interf_p, 0.08, 0.95)
+        pc_base_p = 0.38 * ch_interf_p + 0.26 * (sta / 110.0) * bw_cont_p * (1.0 - 0.42 * ofdma_eff_p)
+        leg_prot_p = 0.085 * (alpha_leg * alpha_leg) * (1.0 + 0.45 * cls._ORACLE_P_BW)
+
+        # 2. Mở rộng tensor trên 1,750 tổ hợp (25 cặp ch/bw x 2 BF x 5 OBSS x 7 Tx) x 12 MCS = 21,000 cấu hình
+        g_p = cls._ORACLE_G_P
+        g_bf = cls._ORACLE_G_BF
+        g_ob = cls._ORACLE_G_OB
+        g_tx = cls._ORACLE_G_TX
+        mcs_req = cls._ORACLE_MCS_REQ
+        mcs_rate = cls._ORACLE_MCS_RATE
+
+        ch_g = cls._ORACLE_P_CH[g_p]
+        tx_dbm_g = 14.0 + g_tx.astype(np.float64)
+        rx_edge_g = rssi - edge_spread_db + (tx_dbm_g - 17.0) - 0.25 * cls._ORACLE_P_FLOSS[g_p]
+        rx_close_g = rssi + (tx_dbm_g - 17.0)
+        lna_ov_g = np.maximum(0.0, rx_close_g - (-43.5)) * 1.65
+        bf_gain_g = np.where(g_bf == 1, bf_gain_9[ch_g], 0.0)
+        csi_ovh_g = np.where(g_bf == 1, bf_ovh_9[ch_g], 0.0)
+
+        sr_norm_g = g_ob.astype(np.float64) / 4.0
+        al_sr_g = alpha_leg_sr_p[g_p]
+        cca_def_g = 0.18 * ((1.0 - sr_norm_g) ** 1.4) * ((1.0 - al_sr_g) ** 1.3)
+        hid_coll_g = 0.26 * (sr_norm_g ** 1.5) * (0.15 + 1.35 * al_sr_g)
+        leak_g = (sr_norm_g ** 1.6) * (1.0 + 8.5 * al_sr_g)
+        eff_sinr_g = rx_edge_g + bf_gain_g - eff_n[g_p] - fading_p[g_p] - lna_ov_g - leak_g
+        ewma_lag_g = ewma_lag_p[g_p]
+
+        per_inst = 1.0 / (1.0 + np.exp(np.clip(0.95 * (eff_sinr_g[:, None] - mcs_req[None, :] - 1.8), -40.0, 40.0)))
+        per_ewma = 1.0 / (1.0 + np.exp(np.clip(0.95 * (eff_sinr_g[:, None] + ewma_lag_g[:, None] - mcs_req[None, :] - 1.8), -40.0, 40.0)))
+        p_succ = 1.0 - per_ewma
+        tp_ewma = np.where(p_succ >= 0.10, np.minimum(0.90, p_succ), 0.0) * mcs_rate[None, :]
+        prob_sc = p_succ * np.minimum(mcs_rate[None, :], 68.8)
+
+        op_mcs = np.empty((1750, 12), dtype=np.float64)
+        eff_mcs_rate = np.empty((1750, 12), dtype=np.float64)
+        per_phy = np.empty((1750, 12), dtype=np.float64)
+        best_tp = np.full(1750, -1.0)
+        r0 = np.zeros(1750, dtype=np.int64)
+        r1 = np.zeros(1750, dtype=np.int64)
+        best_ps = np.full(1750, -1.0)
+        rp = np.zeros(1750, dtype=np.int64)
+        row_idx = cls._ORACLE_ROW_IDX
+        cum_rate_succ = np.cumsum(mcs_rate[None, :] * (1.0 - per_inst), axis=1)
+        cum_per = np.cumsum(per_inst, axis=1)
+
+        for c_idx in range(12):
+            upd = tp_ewma[:, c_idx] > best_tp
+            r1 = np.where(upd, r0, r1)
+            best_tp = np.where(upd, tp_ewma[:, c_idx], best_tp)
+            r0 = np.where(upd, c_idx, r0)
+
+            upd_p = prob_sc[:, c_idx] > best_ps
+            best_ps = np.where(upd_p, prob_sc[:, c_idx], best_ps)
+            rp = np.where(upd_p, c_idx, rp)
+
+            p0 = per_inst[row_idx, r0]
+            p1 = per_inst[row_idx, r1]
+            norm_rate = (1.0 - p0) * mcs_rate[r0] + p0 * (1.0 - p1) * mcs_rate[r1] + p0 * p1 * mcs_rate[rp] * 0.65
+            norm_per = p0 * 0.58 + p0 * p1 * 0.42
+            has_pr = c_idx > r0
+            n_pr = np.maximum(1, c_idx - r0).astype(np.float64)
+            pr_r_sum = cum_rate_succ[:, c_idx] - cum_rate_succ[row_idx, r0]
+            pr_p_sum = cum_per[:, c_idx] - cum_per[row_idx, r0]
+            eff_mcs_rate[:, c_idx] = np.where(has_pr, 0.36 * (0.85 * norm_rate + 0.15 * (pr_r_sum / n_pr)), 0.36 * norm_rate)
+            per_phy[:, c_idx] = np.clip(np.where(has_pr, 0.85 * norm_per + 0.15 * (pr_p_sum / n_pr), norm_per), 0.002, 0.96)
+            op_mcs[:, c_idx] = r0.astype(np.float64)
+
+        p_c = np.clip(pc_base_p[g_p, None] + 0.38 * per_phy + cca_def_g[:, None] + hid_coll_g[:, None], 0.02, 0.96)
+        retry_r = np.clip(0.55 * p_c + 0.45 * per_phy, 0.01, 0.96)
+
+        bcn_ovh = 0.055 if bcn_opt == 0 else 0.012
+        roam_fac = (1.00 if bcn_opt == 0 else 0.74) if is_break_flag else 1.00
+        tonal_g = cls._ORACLE_P_TONAL[g_p, None]
+        r_he_raw = np.maximum(4.0, eff_mcs_rate * tonal_g)
+        r_leg_cap = np.minimum(r_he_raw, 26.0 + 2.0 * op_mcs)
+        r_harm = 1.0 / ((1.0 - alpha_leg) / r_he_raw + alpha_leg / np.maximum(r_leg_cap, 1.0))
+        eta_h = (0.72 + 0.28 * (r_harm / r_he_raw)) if aqm_enabled else (r_harm / r_he_raw)
+        tot_ovh = np.minimum(0.45, bcn_ovh + csi_ovh_g[:, None] + leg_prot_p[g_p, None] + 0.60 * cca_def_g[:, None])
+        ofdma_g = ofdma_eff_p[g_p, None]
+        srv_cap = np.maximum(6.0, r_he_raw * eta_h * roam_fac * (0.88 + 0.24 * ofdma_g) * (1.0 - tot_ovh) * (1.0 - p_c) * (1.0 - 0.65 * per_phy))
+
+        exog_ls = cls._clip_scalar((rssi - (-88.0)) / 38.0, 0.32, 1.10)
+        if sta <= 30.0 and alpha_leg < 0.40 and rssi >= -60.0:
+            raw_d = 148.0 + 1.25 * sta
+        elif sta <= 32.0 and alpha_leg < 0.40:
+            raw_d = 86.0 + 1.05 * sta
+        elif sta <= 78.0 and alpha_leg < 0.55:
+            raw_d = 52.0 + 0.35 * sta
+        else:
+            raw_d = 18.0 + 0.05 * sta
+        off_load = raw_d * exog_ls * float(demand_scale)
+        cur_bkl = max(0.0, float(queue_backlog_mb))
+
+        es_ms = 12.0 / srv_cap
+        cs2 = np.maximum(0.25, 0.55 + 2.8 * (p_c * p_c) + 1.6 * retry_r - 0.30 * ofdma_g)
+        rho = off_load / srv_cap
+        ov_rat = np.maximum(0.0, (off_load - srv_cap) / max(off_load, 1.0))
+        rho_eff = np.minimum(rho, 0.92 if aqm_enabled else 0.985)
+        w_pk = (rho_eff * es_ms * (1.0 + cs2)) / (2.0 * np.maximum(0.015, 1.0 - rho_eff))
+        if aqm_enabled:
+            w_pk = np.minimum(w_pk, 3.8 + 2.4 * np.maximum(0.0, rho - 0.85))
+            c_drop = 0.045 * ov_rat
+        else:
+            w_pk = w_pk + 28.0 * np.maximum(0.0, rho - 0.90)
+            c_drop = 0.48 * ov_rat
+
+        w_bkl = (cur_bkl / srv_cap) * 1000.0
+        retrans_d = 1.10 * (retry_r / np.maximum(1.0 - retry_r, 0.16))
+        hand_d = 3.2 if (is_break_flag and bcn_opt == 1) else 0.0
+        mean_lat = 1.50 + w_pk + w_bkl + retrans_d + hand_d
+        jit = 0.12 + 1.25 * (p_c * p_c) + ((1.50 if aqm_enabled else 8.00) * ov_rat) + 0.42 * (alpha_leg * alpha_leg)
+
+        ex_m = np.maximum(0.05, mean_lat - 1.50)
+        sig_j = np.maximum(0.04, jit)
+        sh_k = np.maximum(0.25, (ex_m / sig_j) ** 2.0)
+        wh_t = np.maximum(0.15, 1.0 - 1.0 / (9.0 * sh_k) + 2.326347874 / (3.0 * np.sqrt(sh_k)))
+        p99_lat = 1.50 + ex_m * (wh_t ** 3.0)
+
+        loss_rat = np.clip((p_c * per_phy) ** 3.0 + c_drop, 0.0, 1.0)
+        loss_pct = loss_rat * 100.0
+        raw_gp = np.minimum(off_load, srv_cap)
+        tcp_f = (1.0 - loss_rat) * (1.0 - 0.16 * np.minimum(1.0, np.maximum(0.0, p99_lat - 15.0) / 85.0))
+        gp = raw_gp * np.maximum(0.15, tcp_f)
+
+        gp_ful = gp / max(off_load, 1.0)
+        cap_hd = 0.52 * np.log1p(srv_cap / max(off_load, 25.0))
+        en_pen = 0.032 * (tx_dbm_g[:, None] - 14.0)
+        pen_col = 3.40 * (p_c * p_c) + 2.10 * per_phy
+        pen_lat = 0.042 * np.minimum(p99_lat, 60.0) + 1.25 * np.tanh(np.maximum(0.0, p99_lat - 15.0) / 15.0)
+        pen_lss = 3.20 * loss_rat + np.where(loss_pct >= 1.0, 0.60, 0.0)
+        sla_b = np.where((p99_lat <= 15.0) & (loss_pct < 1.0), 0.60, -0.40)
+        rew = 2.60 * gp_ful + 0.65 * (gp / 100.0) + cap_hd - pen_col - pen_lat - pen_lss - en_pen + sla_b
+
+        flat_idx = int(np.argmax(rew))
+        g_idx, mcs_best = divmod(flat_idx, 12)
+        p_idx = int(g_p[g_idx])
+        best_act = np.array(
+            [int(cls._ORACLE_P_CH[p_idx]), int(cls._ORACLE_P_BW[p_idx]), int(g_tx[g_idx]), int(mcs_best), int(bcn_opt), int(g_ob[g_idx]), int(g_bf[g_idx])],
+            dtype=np.int64,
+        )
+        best_m = cls._original_evaluate_network_physics(
+            obs, best_act, aqm_enabled=aqm_enabled, sub_noise_dbm=spec,
+            base_ofdma_capacity=base_ofdma_capacity, demand_scale=demand_scale, queue_backlog_mb=queue_backlog_mb,
+        )
+        return best_act, best_m
 
     def _sample_markov_regime(self) -> None:
         """
@@ -1115,17 +1334,19 @@ class UltimateDigitalTwinEnv(gym.Env):
             self.target_demand_scale = float(self.rng.uniform(0.80, 1.10))
             self.current_is_break = 1.0 if self.rng.random() < 0.25 else 0.0
 
-        elif regime == 2:  # Nhiễu băng rộng đánh sập 1 cụm 40/80 MHz (UNII-1 hoặc UNII-3 Low/Mid)
+        elif regime == 2:  # Nhiễu băng rộng đánh sập 1 cụm 40/80 MHz (UNII-1, UNII-3 Low/Mid, 40MHz, hoặc cụm cao CH157..165)
             self.target_ch_noise = base_clean
-            cluster_type = int(self.rng.choice([0, 1, 2]))  # 0: sập UNII-1; 1: sập UNII-3 149..161; 2: sập 1 cụm 40MHz bất kỳ
+            cluster_type = int(self.rng.choice([0, 1, 2, 3], p=[0.30, 0.30, 0.25, 0.15]))
             jam_lvl = float(self.rng.uniform(-71.5, -54.0))
             if cluster_type == 0:
                 self.target_ch_noise[0:4] = jam_lvl - self.rng.uniform(0.0, 2.5, size=4)
             elif cluster_type == 1:
                 self.target_ch_noise[4:8] = jam_lvl - self.rng.uniform(0.0, 2.5, size=4)
-            else:
+            elif cluster_type == 2:
                 pair_start = int(self.rng.choice([0, 2, 4, 6]))
                 self.target_ch_noise[pair_start:pair_start + 2] = jam_lvl - self.rng.uniform(0.0, 2.0, size=2)
+            else:
+                self.target_ch_noise[6:9] = jam_lvl - self.rng.uniform(0.0, 2.2, size=3)
             self.target_sta = float(self.rng.uniform(12.0, 68.0))
             self.target_ofdma_base = float(self.rng.uniform(0.32, 0.62))
             self.target_demand_scale = float(self.rng.uniform(0.80, 1.05))
@@ -1194,6 +1415,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             self.rng = np.random.default_rng(self.base_seed)
         self.current_step = 0
         self.previous_action = None
+        self.queue_backlog_mb = 0.0
 
         obs0, true_noise, _, _ = self.sample_snapshot_scenario()
         self.true_ch_noise = true_noise.copy()
@@ -1203,12 +1425,9 @@ class UltimateDigitalTwinEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         """
-        Chuyển tiếp trạng thái Markov Vật lý Liên tục (Continuous Physics Evolution):
-        1. Thực thi hành động trên trường phổ thực `self.true_ch_noise[0..8]`.
-        2. Kênh chọn mới trở thành `self.current_ch = action[0]`, nên `noise_next` phản ánh đúng
-           nhiễu thực của kênh vừa chọn (`noise_on_chosen_ch`).
-        3. Các chỉ số MAC (`retry`, `p_c`, `airtime`, `ofdma`) tiến hóa 75% trực tiếp từ kết quả `metrics`
-           của hành động Agent; môi trường ngoại lai trôi theo Ornstein-Uhlenbeck & thời lượng Markov ngẫu nhiên.
+        Chuyển tiếp trạng thái Semi-Markov Regime Switching + Ornstein-Uhlenbeck chính xác (dt = 10s):
+          X_{t+dt} = X_t * e^{-theta*dt} + mu * (1 - e^{-theta*dt}) + sigma_stat * sqrt(1 - e^{-2*theta*dt}) * eps
+        và cập nhật tồn dư hàng đợi M/G/1 Lindley (`self.queue_backlog_mb`) + phép đo survey `mt76`.
         """
         self.current_step += 1
         act = np.asarray(action, dtype=np.int64).reshape(-1)
@@ -1222,32 +1441,47 @@ class UltimateDigitalTwinEnv(gym.Env):
             sub_noise_dbm=self.true_ch_noise,
             base_ofdma_capacity=self.target_ofdma_base,
             demand_scale=self.target_demand_scale,
+            queue_backlog_mb=self.queue_backlog_mb,
         )
         self.current_ch = int(np.clip(act[0], 0, len(NON_DFS_5G_CHANNELS) - 1))
         self.previous_action = act.copy()
+        self.queue_backlog_mb = float(metrics.get("backlog_next_mb", 0.0))
 
-        # Tiến hóa chế độ môi trường Markov liên tục với thời lượng ngẫu nhiên 15..55 bước
+        # Chuyển pha Semi-Markov với thời lượng ngẫu nhiên 15..55 bước
         self.regime_remaining_steps -= 1
         if self.regime_remaining_steps <= 0:
             self._sample_markov_regime()
 
-        # Ornstein-Uhlenbeck Drift cho 9 kênh phổ thực (jammer tăng/giảm tốc độ bám 0.65)
-        alpha_rf = 0.65
-        noise_drift = self.rng.normal(0.0, 0.40, size=9).astype(np.float32)
+        # Lấy mẫu giải tích chính xác quá trình Ornstein-Uhlenbeck cho 9 kênh phổ tại dt = 10.0s
+        decay_rf = math.exp(-OU_THETA_RF * DT_STEP_SEC)
+        std_rf = OU_SIGMA_STAT_RF * math.sqrt(1.0 - decay_rf * decay_rf)
+        noise_drift = self.rng.normal(0.0, std_rf, size=9).astype(np.float32)
         self.true_ch_noise = np.clip(
-            (1.0 - alpha_rf) * self.true_ch_noise + alpha_rf * self.target_ch_noise + noise_drift,
+            decay_rf * self.true_ch_noise + (1.0 - decay_rf) * self.target_ch_noise + noise_drift,
             -102.0,
             -51.0,
         ).astype(np.float32)
 
-        # Tiến hóa Ornstein-Uhlenbeck cho RSSI & STA (ngoại sinh)
-        rssi_next = float(np.clip(0.80 * float(prev_obs[0]) + 0.20 * self.target_rssi + self.rng.normal(0.0, 0.8), OBS_LOW[0], OBS_HIGH[0]))
-        sta_next = float(np.clip(0.82 * float(prev_obs[2]) + 0.18 * self.target_sta + self.rng.normal(0.0, 1.8), OBS_LOW[2], OBS_HIGH[2]))
+        # Lấy mẫu OU chính xác cho RSSI & mật độ STA ngoại sinh tại dt = 10.0s
+        decay_rssi = math.exp(-OU_THETA_RSSI * DT_STEP_SEC)
+        std_rssi = OU_SIGMA_STAT_RSSI * math.sqrt(1.0 - decay_rssi * decay_rssi)
+        rssi_next = float(np.clip(
+            decay_rssi * float(prev_obs[0]) + (1.0 - decay_rssi) * self.target_rssi + self.rng.normal(0.0, std_rssi),
+            OBS_LOW[0],
+            OBS_HIGH[0],
+        ))
 
-        # CẢM BIẾN PHY: nhiễu nền đo trên toàn cụm subchannel đang gộp (`occupied_subs` của kênh & BW đang dùng)
-        _, _, occ_subs_step, _ = resolve_valid_5g_channel_and_bw(self.current_ch, int(np.clip(act[1], 0, 2)))
-        occ_noise_max = max(float(self.true_ch_noise[self._CH_INDEX_MAP[c]]) for c in occ_subs_step)
-        noise_next = float(np.clip(occ_noise_max + self.rng.normal(0.0, 0.25), OBS_LOW[1], OBS_HIGH[1]))
+        decay_sta = math.exp(-OU_THETA_STA * DT_STEP_SEC)
+        std_sta = OU_SIGMA_STAT_STA * math.sqrt(1.0 - decay_sta * decay_sta)
+        sta_next = float(np.clip(
+            decay_sta * float(prev_obs[2]) + (1.0 - decay_sta) * self.target_sta + self.rng.normal(0.0, std_sta),
+            OBS_LOW[2],
+            OBS_HIGH[2],
+        ))
+
+        # CẢM BIẾN PHY: mô phỏng đúng cơ chế khảo sát `iw survey dump [in use]` trên driver mt76
+        survey_noise_dbm = measure_mt76_survey_noise(self.true_ch_noise, self.current_ch, int(np.clip(act[1], 0, 2)))
+        noise_next = float(np.clip(survey_noise_dbm + self.rng.normal(0.0, 0.25), OBS_LOW[1], OBS_HIGH[1]))
 
         # PHẢN HỒI NHÂN QUẢ TẦNG MAC (75% trực tiếp từ kết quả thực thi `metrics` của Agent)
         retry_next = float(np.clip(0.25 * float(prev_obs[3]) + 0.75 * metrics["retry_rate"] + self.rng.normal(0.0, 0.012), OBS_LOW[3], OBS_HIGH[3]))
@@ -1283,6 +1517,7 @@ class UltimateDigitalTwinEnv(gym.Env):
             prev_action=None,
             aqm_enabled=self.aqm_enabled,
             sub_noise_dbm=sub_noise_dbm,
+            queue_backlog_mb=self.queue_backlog_mb,
         )
         return float(metrics["reward"])
 
@@ -1292,7 +1527,8 @@ class UltimateDigitalTwinEnv(gym.Env):
         sub_noise_dbm: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         opt_act, _ = self.compute_optimal_targets(
-            current_real_state, aqm_enabled=self.aqm_enabled, sub_noise_dbm=sub_noise_dbm
+            current_real_state, aqm_enabled=self.aqm_enabled, sub_noise_dbm=sub_noise_dbm,
+            queue_backlog_mb=self.queue_backlog_mb,
         )
         return opt_act
 

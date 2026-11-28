@@ -1,0 +1,7 @@
+Metric,Real_N,Real_Mean,Real_P5_P95,Twin_v3_Mean,Twin_v3_P5_P95,Notes
+avg_rssi_active_dBm,6200,-44.105,"[-53.67, -38.17]",-56.816,"[-75.03, -41.86]",Testbed đặt gần AP nên RSSI cao (-44 dBm); Digital Twin bao phủ cả nút biên xa (-82..-40 dBm)
+airtime_util_active,6200,0.0895,"[0.005, 0.757]",0.7168,"[0.263, 1.000]",Tỷ lệ chiếm kênh khi có STA hoạt động (Oracle + default Minstrel mix trên Twin v3)
+airtime_util_idle_obss,16108,0.3754,"[0.025, 0.684]",N/A (active sim),Real P99=0.818,"Khi STA=0, OBSS nền ngoài thực địa vẫn chiếm trung bình 37.5% (tới 81.9% P99) airtime"
+p_c_active_tail,6200,0.0592,"[0.000, 0.591]",0.3958,"[0.127, 0.963]","Thực đo Testbed có đuôi p_c P95=0.591, P99=0.927 khi có burst; khớp dải biến thiên Twin v3"
+retry_over_pc_ratio,655,0.6323,N/A,0.7366,N/A,Tỷ lệ empirical retry/p_c trên testbed (0.59..0.75) đồng nhất với cơ chế MAC v3
+lag1_autocorr_D4:53:2A:B2:92:DF,6167,0.9863,"airtime_ac1=0.9801, pc_ac1=0.7683",0.8001,exp(-theta_rssi*dt)=0.8001 (dt=10s) vs 0.9863 (dt_real=3s),Theo định luật thang OU e^{-theta*dt}: 0.9863^(10/3) = 0.955 (RSSI thực tế trôi chậm khi đứng yên)
