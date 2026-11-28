@@ -1,14 +1,18 @@
-import os
+import os 
+import subprocess
 import time
 import threading
 import csv
 from datetime import datetime
 from scapy.all import sniff
-from scapy.layers.dot11 import Dot11, RadioTap, Dot11Beacon
+from scapy.layers.dot11 import Dot11, RadioTap, Dot11Beacon, Dot11Elt
 
 # Cấu hình file xuất dữ liệu cho data_visualization.ipynb
-HISTORY_CSV_PATH = "data/processed/telemetry_history.csv"
-HISTORY_COLUMNS = ["Timestamp", "AP_MAC", "Channel", "avg_rssi", "total_packets", "retry_packets", "p_c"]
+HISTORY_CSV_PATH = "data/processed/telemetry_history_NEW.csv"
+HISTORY_COLUMNS = [
+    "Timestamp", "AP_MAC", "SSID", "Channel",
+    "avg_rssi", "total_packets", "retry_packets", "p_c", "sta_count"
+]
 
 class USBSniffer:
     def __init__(self, iface="wlan0mon"):
@@ -17,6 +21,8 @@ class USBSniffer:
         self.ap_stats = {}
         self.lock = threading.Lock()
         self.current_channel = 1
+        self.ssid_map = {}                  # Dictionary lưu ánh xạ BSSID -> {"ssid": str, "channel": int} thu được từ các gói Beacon
+        self.stop_event = threading.Event() # Cờ đồng bộ đa luồng giúp báo hiệu cho tất cả các luồng nền dừng lại an toàn
         
         # Tạo thư mục và file CSV nếu chưa tồn tại
         os.makedirs(os.path.dirname(HISTORY_CSV_PATH), exist_ok=True)
@@ -27,11 +33,14 @@ class USBSniffer:
     def _channel_hopper(self):
         """Tầng PHY: Nhảy kênh liên tục để quét toàn bộ không gian vô tuyến"""
         print(f"[📡] Bắt đầu nhảy kênh trên {self.iface}...")
-        while True:
+        while not self.stop_event.is_set():
             for ch in self.channels:
-                os.system(f"iwconfig {self.iface} channel {ch}")
+                if self.stop_event.is_set(): 
+                    break
+                subprocess.run(["iw", "dev", self.iface, "set", "channel", str(ch)], 
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.current_channel = ch
-                time.sleep(0.5) # Dừng lại 0.5s ở mỗi kênh để bắt gói tin
+                self.stop_event.wait(0.5) # Dừng lại 0.5s ở mỗi kênh để bắt gói tin
 
     def _process_packet(self, _packet):
         """Tầng PHY & MAC: Bóc tách gói tin và trích xuất thông số"""
@@ -39,10 +48,14 @@ class USBSniffer:
         if not _packet.haslayer(Dot11):
             return
 
+        if _packet.type == 0 and _packet.subtype == 8:
+            stats = _packet[Dot11Beacon].network_stats()
+            bssid = _packet.addr2.upper()
+        
         # Chỉ phân tích Data Frames (type == 2) để đo đụng độ thực tế
         if _packet.type == 2:
             # Tầng MAC: Lấy BSSID (Định danh AP) từ Address 1, 2 hoặc 3 tùy vào hướng cờ To-DS/From-DS
-            bssid = _packet.addr1 if _packet.addr1 else "UNKNOWN"
+            """Đang chỉnh sửa lại _process_packet 28-11-2026"""
             if bssid == "FF:FF:FF:FF:FF:FF" or bssid == "UNKNOWN":
                 return
             bssid = bssid.upper()
